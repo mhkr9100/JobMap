@@ -1,4 +1,11 @@
-export type JobStatus = "Available" | "Applied" | "Interview" | "Rejected";
+export type JobStatus =
+  | "Available"
+  | "Applied"
+  | "Interview"
+  | "Rejected"
+  | "Inactive"
+  | "Expired"
+  | "Closed";
 export type StatusFilter = "All" | JobStatus;
 export type JobSort = "newest" | "company" | "role";
 export type WorkType = "Remote" | "Hybrid" | "On-site";

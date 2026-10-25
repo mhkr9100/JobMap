@@ -37,6 +37,12 @@ export default function JobTracker() {
           max_lat: viewport.maxLat,
         });
 
+        // Filter out inactive or expired jobs at query level
+        request = request
+          .neq("status", "Inactive")
+          .neq("status", "Expired")
+          .neq("status", "Closed");
+
         // Basic database-side pushdowns
         if (filters.workModels.length > 0) {
           request = request.in("workType", filters.workModels);

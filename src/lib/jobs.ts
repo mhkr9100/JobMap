@@ -269,6 +269,9 @@ export function normalizeJobStatus(status: unknown): Job["status"] {
   if (value === "applied") return "Applied";
   if (value === "interview") return "Interview";
   if (value === "rejected") return "Rejected";
+  if (value === "inactive") return "Inactive";
+  if (value === "expired") return "Expired";
+  if (value === "closed") return "Closed";
   return "Available";
 }
 
@@ -442,6 +445,16 @@ export function filterJobs(jobs: Job[], filters: JobSearchFilters): Job[] {
   const companyName = filters.companyName.trim().toLowerCase();
 
   return jobs.filter((job) => {
+    // Strict Inactive Filtering: Inactive, expired, and closed jobs are removed from the map
+    if (
+      job.status === "Inactive" ||
+      job.status === "Expired" ||
+      job.status === "Closed" ||
+      job.status === "Rejected"
+    ) {
+      return false;
+    }
+
     // 0. General text search query
     if (query) {
       const match =
