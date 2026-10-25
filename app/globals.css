@@ -1,0 +1,170 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: #f7f8fa;
+  --foreground: #17232a;
+  --card: #ffffff;
+  --card-foreground: #17232a;
+  --popover: #ffffff;
+  --popover-foreground: #17232a;
+  --primary: #137b60;
+  --primary-foreground: #ffffff;
+  --secondary: #edf1f0;
+  --secondary-foreground: #43534c;
+  --muted: #edf0f1;
+  --muted-foreground: #748087;
+  --accent: #e6eeeb;
+  --accent-foreground: #233b31;
+  --destructive: #dc4545;
+  --border: #e4e8e8;
+  --input: #dde3e3;
+  --ring: #369a7d;
+  --radius: 0.75rem;
+  --available: #3879cd;
+  --available-subtle: #edf4ff;
+  --applied: #138263;
+  --applied-subtle: #e8f5ed;
+  --interview: #9b6c23;
+  --interview-subtle: #fdf4e3;
+  --map: #eef1f2;
+  --map-grid: #d7dfe1;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-available: var(--available);
+  --color-available-subtle: var(--available-subtle);
+  --color-applied: var(--applied);
+  --color-applied-subtle: var(--applied-subtle);
+  --color-interview: var(--interview);
+  --color-interview-subtle: var(--interview-subtle);
+  --color-map: var(--map);
+  --color-map-grid: var(--map-grid);
+  --font-sans: var(--font-geist-sans);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  button,
+  input,
+  select,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+  ::selection {
+    background: #bbe8d7;
+    color: #12352a;
+  }
+}
+
+.sidebar-theme {
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+  --card: #151e31;
+  --card-foreground: #f1f5f9;
+  --popover: #182235;
+  --popover-foreground: #f1f5f9;
+  --primary: #83d6b5;
+  --primary-foreground: #102a24;
+  --secondary: #1d293c;
+  --secondary-foreground: #d0d8e4;
+  --muted: #192337;
+  --muted-foreground: #94a0b5;
+  --accent: #202c41;
+  --accent-foreground: #f1f5f9;
+  --border: #243045;
+  --input: #29354a;
+  --ring: #83d6b5;
+  --available: #86b7f4;
+  --available-subtle: #1a304c;
+  --applied: #7fd1ad;
+  --applied-subtle: #16392f;
+  --interview: #e3c18a;
+  --interview-subtle: #3b3326;
+  color-scheme: dark;
+}
+
+.job-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #344054 transparent;
+}
+.job-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.job-scrollbar::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: #344054;
+}
+
+.map-grid {
+  background-image: radial-gradient(
+    circle,
+    var(--map-grid) 1px,
+    transparent 1px
+  );
+  background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse at center, #000 10%, transparent 69%);
+}
+
+.map-icon-shadow {
+  box-shadow:
+    0 16px 36px -15px #526b6640,
+    0 3px 7px #3c585110;
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-enter {
+  animation: enter 450ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
