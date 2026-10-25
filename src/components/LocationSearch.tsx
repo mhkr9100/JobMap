@@ -1,62 +1,213 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import {
-  Building2,
-  ExternalLink,
-  Loader2,
-  MapPin,
-  Search,
-  X,
-} from "lucide-react";
+import { Building2, GraduationCap, Landmark, Loader2, MapPin, Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Job } from "@/types";
+import type { MapTarget } from "@/types";
 
-interface GeocodingFeature {
+/**
+ * Location-only search: cities, states, neighborhoods, addresses and every kind of
+ * organization (universities, schools, companies, non-profits, hospitals…).
+ * Primary: Mapbox Search Box (suggest → retrieve, billed per session).
+ * Fallback: Photon (OpenStreetMap, free) if Mapbox returns nothing or errors.
+ */
+
+type PlaceKind = "region" | "city" | "area" | "address" | "school" | "org";
+
+interface PlaceSuggestion {
   id: string;
-  center: [number, number];
-  place_name: string;
-}
-
-interface GeocodingResponse {
-  features?: GeocodingFeature[];
-}
-
-export interface SearchMatch {
-  type: "location" | "job";
-  title: string;
+  name: string;
   subtitle: string;
-  coords: [number, number];
-  jobId?: string;
+  kind: PlaceKind;
+  source: "mapbox" | "photon";
+  zoom: number;
+  /** Photon results already carry coordinates. */
+  center?: [number, number];
+  bbox?: [number, number, number, number];
+}
+
+interface MapboxSuggestion {
+  mapbox_id: string;
+  name: string;
+  feature_type: string;
+  full_address?: string;
+  place_formatted?: string;
+  poi_category?: string[];
+}
+
+interface MapboxRetrieveResponse {
+  features?: {
+    geometry: { coordinates: [number, number] };
+    properties: { bbox?: [number, number, number, number]; feature_type?: string };
+  }[];
+}
+
+interface PhotonFeature {
+  geometry: { coordinates: [number, number] };
+  properties: {
+    osm_id?: number;
+    osm_key?: string;
+    osm_value?: string;
+    name?: string;
+    city?: string;
+    state?: string;
+    country?: string;
+    extent?: [number, number, number, number];
+  };
 }
 
 interface LocationSearchProps {
-  onLocationSelected: (coords: [number, number], name: string) => void;
-  onJobSelected?: (jobId: string, coords: [number, number]) => void;
-  availableJobs?: Job[];
+  onLocationSelected: (target: Omit<MapTarget, "nonce">, name: string) => void;
+  proximity?: [number, number] | null;
 }
 
-export default function LocationSearch({
-  onLocationSelected,
-  onJobSelected,
-  availableJobs = [],
-}: LocationSearchProps) {
+const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ?? "";
+const SCHOOL_WORDS = /universit|college|school|academy|campus|institute/i;
+
+function zoomForMapboxType(type: string): number {
+  switch (type) {
+    case "country":
+      return 3.5;
+    case "region":
+      return 6;
+    case "postcode":
+    case "district":
+      return 10;
+    case "place":
+    case "city":
+      return 11;
+    case "locality":
+    case "neighborhood":
+      return 13.5;
+    case "street":
+      return 15.5;
+    default:
+      return 17; // address, poi
+  }
+}
+
+function kindForMapbox(s: MapboxSuggestion): PlaceKind {
+  if (s.feature_type === "country" || s.feature_type === "region") return "region";
+  if (s.feature_type === "place" || s.feature_type === "city") return "city";
+  if (["postcode", "district", "locality", "neighborhood"].includes(s.feature_type)) return "area";
+  if (s.feature_type === "poi") {
+    const cats = (s.poi_category ?? []).join(" ");
+    return SCHOOL_WORDS.test(`${s.name} ${cats}`) ? "school" : "org";
+  }
+  return "address";
+}
+
+function newSessionToken(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function suggestMapbox(
+  q: string,
+  session: string,
+  proximity: [number, number] | null | undefined,
+  signal: AbortSignal,
+): Promise<PlaceSuggestion[]> {
+  if (!TOKEN) return [];
+  const params = new URLSearchParams({
+    q,
+    access_token: TOKEN,
+    session_token: session,
+    limit: "8",
+    language: "en",
+    types: "region,postcode,district,place,locality,neighborhood,street,address,poi",
+  });
+  if (proximity) params.set("proximity", `${proximity[0]},${proximity[1]}`);
+  const res = await fetch(`https://api.mapbox.com/search/searchbox/v1/suggest?${params}`, {
+    signal,
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { suggestions?: MapboxSuggestion[] };
+  return (data.suggestions ?? []).map((s) => ({
+    id: s.mapbox_id,
+    name: s.name,
+    subtitle: s.full_address ?? s.place_formatted ?? "",
+    kind: kindForMapbox(s),
+    source: "mapbox" as const,
+    zoom: zoomForMapboxType(s.feature_type),
+  }));
+}
+
+async function suggestPhoton(
+  q: string,
+  proximity: [number, number] | null | undefined,
+  signal: AbortSignal,
+): Promise<PlaceSuggestion[]> {
+  const params = new URLSearchParams({ q, limit: "8", lang: "en" });
+  if (proximity) {
+    params.set("lon", String(proximity[0]));
+    params.set("lat", String(proximity[1]));
+  }
+  const res = await fetch(`https://photon.komoot.io/api/?${params}`, { signal });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { features?: PhotonFeature[] };
+  return (data.features ?? [])
+    .filter((f) => f.properties.name)
+    .map((f) => {
+      const p = f.properties;
+      const isPlace = p.osm_key === "place" || p.osm_key === "boundary";
+      const kind: PlaceKind = isPlace
+        ? p.osm_value === "state"
+          ? "region"
+          : p.osm_value === "city" || p.osm_value === "town"
+            ? "city"
+            : "area"
+        : SCHOOL_WORDS.test(`${p.name} ${p.osm_value}`)
+          ? "school"
+          : "org";
+      const e = p.extent; // [minLon, maxLat, maxLon, minLat]
+      return {
+        id: `photon-${p.osm_id ?? p.name}`,
+        name: p.name ?? "",
+        subtitle: [p.city, p.state].filter(Boolean).join(", "),
+        kind,
+        source: "photon" as const,
+        zoom: kind === "region" ? 6 : kind === "city" ? 11 : kind === "area" ? 13.5 : 17,
+        center: f.geometry.coordinates,
+        bbox: e ? ([e[0], e[3], e[2], e[1]] as [number, number, number, number]) : undefined,
+      };
+    });
+}
+
+function KindIcon({ kind }: { kind: PlaceKind }) {
+  if (kind === "school") return <GraduationCap className="size-3.5" />;
+  if (kind === "org") return <Building2 className="size-3.5" />;
+  if (kind === "region") return <Landmark className="size-3.5" />;
+  return <MapPin className="size-3.5" />;
+}
+
+const KIND_LABEL: Record<PlaceKind, string> = {
+  region: "State",
+  city: "City",
+  area: "Area",
+  address: "Address",
+  school: "Education",
+  org: "Organization",
+};
+
+export default function LocationSearch({ onLocationSelected, proximity }: LocationSearchProps) {
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [results, setResults] = useState<SearchMatch[]>([]);
+  const [results, setResults] = useState<PlaceSuggestion[]>([]);
   const [isOpen, setIsOpen] = useState(false);
-  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const sessionRef = useRef<string>(newSessionToken());
+  /** Set when a result is chosen so the resulting query change doesn't re-open the list. */
+  const suppressSearchRef = useRef(false);
+  const proximityRef = useRef(proximity);
+  proximityRef.current = proximity;
 
-  // Close dropdown on click outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(event.target as Node)
-      ) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     }
@@ -64,172 +215,126 @@ export default function LocationSearch({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Debounced search for places & matching jobs/companies
   useEffect(() => {
-    const trimmed = query.trim();
-    if (trimmed.length < 2) {
+    if (suppressSearchRef.current) {
+      suppressSearchRef.current = false;
+      return;
+    }
+    const q = query.trim();
+    if (q.length < 2) {
       setResults([]);
       setIsOpen(false);
       setIsLoading(false);
       return;
     }
 
-    setIsLoading(true);
-
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
     const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    const timeout = setTimeout(async () => {
-      const matches: SearchMatch[] = [];
-
-      // 1. Search in loaded jobs (Company or Title match)
-      const qLower = trimmed.toLowerCase();
-      const jobMatches = availableJobs
-        .filter(
-          (j) =>
-            j.company.toLowerCase().includes(qLower) ||
-            j.title.toLowerCase().includes(qLower),
-        )
-        .slice(0, 4)
-        .map((j) => ({
-          type: "job" as const,
-          title: `${j.company} — ${j.title}`,
-          subtitle: `${j.location_label} · ${j.workType}${j.salary ? " · " + j.salary : ""}`,
-          coords: j.coords,
-          jobId: j.id,
-        }));
-      matches.push(...jobMatches);
-
-      // 2. Search places via Mapbox Geocoding API
-      const token = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
-      if (token) {
-        try {
-          const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
-            trimmed,
-          )}.json?access_token=${token}&autocomplete=true&country=us&types=place,locality,neighborhood,address,poi`;
-          const res = await fetch(url, { signal: controller.signal });
-          if (res.ok) {
-            const data = (await res.json()) as GeocodingResponse;
-            const placeMatches = (data.features || []).slice(0, 5).map((f) => ({
-              type: "location" as const,
-              title: f.place_name.split(",")[0] ?? f.place_name,
-              subtitle: f.place_name,
-              coords: f.center,
-            }));
-            matches.push(...placeMatches);
-          }
-        } catch (err: unknown) {
-          if (err instanceof DOMException && err.name === "AbortError") {
-            return;
-          }
-          console.warn("Geocoding lookup notice:", err);
+    setIsLoading(true);
+    const timeout = window.setTimeout(async () => {
+      try {
+        let found = await suggestMapbox(q, sessionRef.current, proximityRef.current, controller.signal);
+        if (found.length === 0) {
+          found = await suggestPhoton(q, proximityRef.current, controller.signal);
         }
+        setResults(found);
+        setIsOpen(found.length > 0);
+        setActiveIndex(-1);
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          console.warn("Location search failed:", err);
+        }
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
       }
-
-      setResults(matches);
-      setIsOpen(matches.length > 0);
-      setIsLoading(false);
-      setSelectedIndex(-1);
-    }, 250);
+    }, 300);
 
     return () => {
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [query, availableJobs]);
+  }, [query]);
 
-  const handleSelect = (match: SearchMatch) => {
-    if (match.type === "job" && match.jobId && onJobSelected) {
-      onJobSelected(match.jobId, match.coords);
-    } else {
-      onLocationSelected(match.coords, match.title);
-    }
-    setQuery(match.title);
+  async function select(place: PlaceSuggestion) {
+    // Close everything immediately; the query change must not re-open the dropdown.
+    suppressSearchRef.current = true;
+    setQuery(place.name);
+    setResults([]);
     setIsOpen(false);
+    setActiveIndex(-1);
     inputRef.current?.blur();
-  };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!isOpen || results.length === 0) {
-      if (e.key === "Enter" && query.trim()) {
-        // Quick geocode fallback
-        handleDirectGeocode(query.trim());
-      }
+    if (place.source === "photon" && place.center) {
+      onLocationSelected({ center: place.center, zoom: place.zoom, bbox: place.bbox }, place.name);
       return;
     }
 
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelectedIndex((prev) => (prev < results.length - 1 ? prev + 1 : 0));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelectedIndex((prev) => (prev > 0 ? prev - 1 : results.length - 1));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const target = selectedIndex >= 0 ? results[selectedIndex] : results[0];
-      if (target) {
-        handleSelect(target);
-      }
-    } else if (e.key === "Escape") {
-      setIsOpen(false);
-    }
-  };
-
-  const handleDirectGeocode = async (text: string) => {
-    const token = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
-    if (!token) return;
     setIsLoading(true);
     try {
-      const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
-        text,
-      )}.json?access_token=${token}&limit=1&country=us`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = (await res.json()) as GeocodingResponse;
-        const feature = data.features?.[0];
-        if (feature) {
-          onLocationSelected(feature.center, feature.place_name);
-          setQuery(feature.place_name.split(",")[0] ?? text);
-        }
+      const params = new URLSearchParams({ access_token: TOKEN, session_token: sessionRef.current });
+      const res = await fetch(
+        `https://api.mapbox.com/search/searchbox/v1/retrieve/${encodeURIComponent(place.id)}?${params}`,
+      );
+      const data = (await res.json()) as MapboxRetrieveResponse;
+      const feature = data.features?.[0];
+      if (feature) {
+        onLocationSelected(
+          {
+            center: feature.geometry.coordinates,
+            zoom: place.zoom,
+            bbox: place.kind === "org" || place.kind === "school" ? undefined : feature.properties.bbox,
+          },
+          place.name,
+        );
       }
     } catch (err) {
-      console.warn("Direct geocode lookup failed:", err);
+      console.warn("Location retrieve failed:", err);
     } finally {
+      sessionRef.current = newSessionToken(); // one session per completed search
       setIsLoading(false);
-      setIsOpen(false);
     }
-  };
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      setIsOpen(false);
+      inputRef.current?.blur();
+      return;
+    }
+    if (!isOpen || results.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex((i) => (i + 1) % results.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((i) => (i <= 0 ? results.length - 1 : i - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const target = results[activeIndex >= 0 ? activeIndex : 0];
+      if (target) void select(target);
+    }
+  }
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute top-6 right-6 z-30 w-full max-w-sm sm:max-w-md"
-    >
-      <div className="relative group">
-        <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors">
+    <div ref={containerRef} className="absolute right-6 top-6 z-30 w-[min(26rem,calc(100vw-3rem))]">
+      <div className="relative">
+        <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
           {isLoading ? (
             <Loader2 className="size-4 animate-spin text-blue-500" />
           ) : (
             <Search className="size-4" />
           )}
         </div>
-
         <input
           ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onFocus={() => {
-            if (results.length > 0) setIsOpen(true);
-          }}
+          onFocus={() => results.length > 0 && setIsOpen(true)}
           onKeyDown={handleKeyDown}
-          placeholder="Search city, company, or role…"
-          className="w-full rounded-full border border-white/40 bg-white/90 py-2.5 pl-10 pr-9 text-xs font-medium text-slate-900 shadow-2xl backdrop-blur-2xl outline-none ring-blue-500/50 transition placeholder:text-slate-400 focus:bg-white focus:ring-2 dark:border-slate-800 dark:bg-slate-900/90 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:bg-slate-900"
+          placeholder="Search a city, state, university, company…"
+          aria-label="Search locations"
+          className="w-full rounded-full border border-white/40 bg-white/95 py-3 pl-11 pr-10 text-sm font-medium text-slate-900 shadow-2xl backdrop-blur-2xl outline-none transition placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/50"
         />
-
         {query && (
           <button
             type="button"
@@ -237,73 +342,54 @@ export default function LocationSearch({
               setQuery("");
               setResults([]);
               setIsOpen(false);
+              inputRef.current?.focus();
             }}
-            className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-            aria-label="Clear search input"
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-slate-400 hover:text-slate-700"
+            aria-label="Clear search"
           >
-            <X className="size-3.5" />
+            <X className="size-4" />
           </button>
         )}
 
-        {/* Suggestions Dropdown */}
         {isOpen && results.length > 0 && (
-          <div className="absolute top-full right-0 mt-2 max-h-80 w-full overflow-y-auto rounded-2xl border border-white/40 bg-white/95 p-1.5 shadow-2xl backdrop-blur-2xl animate-in fade-in zoom-in-95 duration-150 dark:border-slate-800 dark:bg-slate-900/95">
-            {results.map((match, i) => {
-              const isSelected = i === selectedIndex;
-              return (
+          <ul className="absolute right-0 top-full mt-2 max-h-96 w-full overflow-y-auto rounded-2xl border border-white/40 bg-white/95 p-1.5 shadow-2xl backdrop-blur-2xl">
+            {results.map((place, i) => (
+              <li key={`${place.id}-${i}`}>
                 <button
-                  key={`${match.type}-${match.title}-${i}`}
                   type="button"
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    handleSelect(match);
+                    void select(place);
                   }}
+                  onMouseEnter={() => setActiveIndex(i)}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors",
-                    isSelected
-                      ? "bg-blue-50 text-blue-900 dark:bg-blue-950/60 dark:text-blue-100"
-                      : "hover:bg-slate-100/80 dark:hover:bg-slate-800/80",
+                    i === activeIndex ? "bg-blue-50" : "hover:bg-slate-100",
                   )}
                 >
                   <span
                     className={cn(
-                      "flex size-7 shrink-0 items-center justify-center rounded-lg",
-                      match.type === "location"
-                        ? "bg-blue-100 text-blue-600 dark:bg-blue-950 dark:text-blue-400"
-                        : "bg-emerald-100 text-emerald-600 dark:bg-emerald-950 dark:text-emerald-400",
+                      "flex size-8 shrink-0 items-center justify-center rounded-lg",
+                      place.kind === "school"
+                        ? "bg-amber-100 text-amber-700"
+                        : place.kind === "org"
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-blue-100 text-blue-700",
                     )}
                   >
-                    {match.type === "location" ? (
-                      <MapPin className="size-3.5" />
-                    ) : (
-                      <Building2 className="size-3.5" />
-                    )}
+                    <KindIcon kind={place.kind} />
                   </span>
-
-                  <div className="flex min-w-0 flex-1 flex-col">
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="truncate text-xs font-semibold text-slate-900 dark:text-white">
-                        {match.title}
-                      </span>
-                      <span
-                        className={cn(
-                          "shrink-0 rounded px-1.5 py-0.2 text-[9px] font-semibold uppercase tracking-wider",
-                          match.type === "location"
-                            ? "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
-                            : "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/70 dark:text-emerald-400",
-                        )}
-                      >
-                        {match.type === "location" ? "City" : "Job"}
-                      </span>
-                    </div>
-                    <span className="truncate text-[10px] text-slate-500 dark:text-slate-400">
-                      {match.subtitle}
-                    </span>
-                  </div>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate text-sm font-semibold text-slate-900">{place.name}</span>
+                    <span className="truncate text-xs text-slate-500">{place.subtitle}</span>
+                  </span>
+                  <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                    {KIND_LABEL[place.kind]}
+                  </span>
                 </button>
-              );
-            })}
-          </div>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </div>

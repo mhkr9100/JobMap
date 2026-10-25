@@ -6,146 +6,120 @@ import JobSidebar from "@/components/jobmap/job-sidebar";
 import { FloatingJobPopup } from "@/components/jobmap/job-details";
 import AnalyticsDock from "@/components/AnalyticsDock";
 import LocationSearch from "@/components/LocationSearch";
-import { filterJobs, mapSupabaseJob, sampleJobs } from "@/lib/jobs";
+import { filterJobs, isActiveJob, mapSupabaseJob } from "@/lib/jobs";
 import { supabase } from "@/lib/supabase";
-import type { Job, JobSearchFilters, JobViewport } from "@/types";
+import type { Job, JobSearchFilters, JobViewport, MapTarget } from "@/types";
 import { INITIAL_JOB_FILTERS } from "@/types";
 
+const PAGE_SIZE = 1000;
+
 export default function JobTracker() {
-  const [fetchedJobs, setFetchedJobs] = useState<Job[]>(sampleJobs);
+  const [fetchedJobs, setFetchedJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [filters, setFilters] = useState<JobSearchFilters>(INITIAL_JOB_FILTERS);
   const [viewport, setViewport] = useState<JobViewport | null>(null);
   const [visibleCount, setVisibleCount] = useState(0);
-  const [targetLocation, setTargetLocation] = useState<[number, number] | null>(null);
+  const [target, setTarget] = useState<MapTarget | null>(null);
   const [loading, setLoading] = useState(true);
   const latestRequest = useRef(0);
+  const highlightVisible = useRef<() => void>(() => undefined);
 
-  // Fetch jobs in viewport from Supabase
   useEffect(() => {
     if (!viewport) return;
 
+    let cancelled = false;
     const requestNumber = ++latestRequest.current;
     const timeout = window.setTimeout(async () => {
       setLoading(true);
-
       try {
-        let request = supabase.rpc("get_jobs_in_viewport", {
-          min_lng: viewport.minLng,
-          min_lat: viewport.minLat,
-          max_lng: viewport.maxLng,
-          max_lat: viewport.maxLat,
-        });
+        const rows: Record<string, unknown>[] = [];
+        for (let offset = 0; ; offset += PAGE_SIZE) {
+          const { data, error } = await supabase
+            .rpc("get_jobs_in_viewport", {
+              min_lng: viewport.minLng,
+              min_lat: viewport.minLat,
+              max_lng: viewport.maxLng,
+              max_lat: viewport.maxLat,
+            })
+            .order("id", { ascending: true })
+            .range(offset, offset + PAGE_SIZE - 1);
 
-        // Filter out inactive or expired jobs at query level
-        request = request
-          .neq("status", "Inactive")
-          .neq("status", "Expired")
-          .neq("status", "Closed");
-
-        // Basic database-side pushdowns
-        if (filters.workModels.length > 0) {
-          request = request.in("workType", filters.workModels);
-        }
-        if (filters.minSalary !== null) {
-          request = request.gte("salary_max", filters.minSalary);
-        }
-        if (filters.maxSalary !== null) {
-          request = request.lte("salary_min", filters.maxSalary);
-        }
-        if (filters.h1bSponsorship) {
-          request = request.eq("h1b_sponsorship", true);
+          if (error) throw error;
+          const page = (data ?? []) as Record<string, unknown>[];
+          rows.push(...page);
+          if (page.length < PAGE_SIZE || cancelled || requestNumber !== latestRequest.current) break;
         }
 
-        const { data, error } = await request;
-        if (requestNumber !== latestRequest.current) return;
-
-        if (error) {
-          console.warn("Viewport query notice:", error.message);
-          // Keep current or sample jobs on error
-          if (fetchedJobs.length === 0) {
-            setFetchedJobs(sampleJobs);
-          }
-        } else {
-          const rows = (data ?? []) as Record<string, unknown>[];
-          if (rows.length > 0) {
-            const normalized = rows.map(mapSupabaseJob);
-            setFetchedJobs(normalized);
-          } else if (fetchedJobs.length === 0) {
-            setFetchedJobs(sampleJobs);
-          }
+        if (cancelled || requestNumber !== latestRequest.current) return;
+        setFetchedJobs(
+          rows
+            .map((row, index) => mapSupabaseJob(row, index))
+            .filter((job): job is Job => job !== null),
+        );
+      } catch (error) {
+        if (!cancelled && requestNumber === latestRequest.current) {
+          console.error("Could not load jobs for this map area:", error);
+          setFetchedJobs([]);
         }
-      } catch (err) {
-        console.error("Viewport load failed:", err);
       } finally {
-        if (requestNumber === latestRequest.current) {
-          setLoading(false);
-        }
+        if (!cancelled && requestNumber === latestRequest.current) setLoading(false);
       }
-    }, 200);
+    }, 180);
 
-    return () => window.clearTimeout(timeout);
-  }, [viewport, filters.workModels, filters.minSalary, filters.maxSalary, filters.h1bSponsorship]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [viewport]);
 
-  // Apply the 7-category professional filter engine client-side
-  const filteredJobs = useMemo(() => {
-    return filterJobs(fetchedJobs, filters);
-  }, [fetchedJobs, filters]);
+  const filteredJobs = useMemo(() => filterJobs(fetchedJobs, filters), [fetchedJobs, filters]);
+  const activeJobs = useMemo(() => fetchedJobs.filter(isActiveJob), [fetchedJobs]);
+  const selectedJob = useMemo(
+    () => filteredJobs.find((job) => job.id === selectedJobId) ?? null,
+    [filteredJobs, selectedJobId],
+  );
 
-  // Selected job for the floating popup
-  const selectedJob = useMemo(() => {
-    if (!selectedJobId) return null;
-    return (
-      filteredJobs.find((job) => job.id === selectedJobId) ??
-      fetchedJobs.find((job) => job.id === selectedJobId) ??
-      null
-    );
-  }, [selectedJobId, filteredJobs, fetchedJobs]);
+  useEffect(() => {
+    if (selectedJobId && !selectedJob) setSelectedJobId(null);
+  }, [selectedJob, selectedJobId]);
+
+  function selectLocation(next: Omit<MapTarget, "nonce">) {
+    setTarget({ ...next, nonce: Date.now() });
+  }
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-900">
-      {/* 100% Full-Screen 3D Map */}
       <MapView
         jobs={filteredJobs}
         selectedJobId={selectedJobId}
         onSelectJob={(job) => setSelectedJobId(job.id)}
         onViewportChange={setViewport}
-        targetLocation={targetLocation}
         onVisibleCountChange={setVisibleCount}
+        onHighlightVisibleReady={(highlight) => {
+          highlightVisible.current = highlight;
+        }}
+        target={target}
       />
 
-      {/* Floating Translucent Filter Sidebar (Left) */}
-      <JobSidebar filters={filters} setFilters={setFilters} />
+      <JobSidebar jobs={fetchedJobs} filters={filters} setFilters={setFilters} />
 
-      {/* Unified Search (Top Right) */}
       <LocationSearch
-        onLocationSelected={(coords) => {
-          setTargetLocation([coords[0], coords[1]]);
-        }}
-        onJobSelected={(jobId, coords) => {
-          setSelectedJobId(jobId);
-          setTargetLocation([coords[0], coords[1]]);
-        }}
-        availableJobs={fetchedJobs}
+        onLocationSelected={(next) => selectLocation(next)}
+        proximity={viewport ? [(viewport.minLng + viewport.maxLng) / 2, (viewport.minLat + viewport.maxLat) / 2] : null}
       />
 
-      {/* Floating Analytics Dock (Bottom Center) */}
       <AnalyticsDock
-        total={fetchedJobs.length}
+        total={activeJobs.length}
         filtered={filteredJobs.length}
         visible={visibleCount}
+        onHighlightVisible={() => highlightVisible.current()}
       />
 
-      {/* Floating Opportunity Popup on Pin Selection */}
-      <FloatingJobPopup
-        job={selectedJob}
-        onClose={() => setSelectedJobId(null)}
-      />
+      <FloatingJobPopup job={selectedJob} onClose={() => setSelectedJobId(null)} />
 
-      {/* Loading pill */}
       {loading && (
         <div className="absolute bottom-5 right-5 z-20 rounded-full bg-slate-950/80 px-3.5 py-1.5 text-xs font-medium text-white shadow-xl backdrop-blur-md animate-pulse">
-          Searching this map area…
+          Counting jobs in this map area…
         </div>
       )}
     </div>
