@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
-import type { FeatureCollection, Point } from "geojson";
+import type { Feature, FeatureCollection, Point, Polygon } from "geojson";
 import { ExternalLink, MapPin, X } from "lucide-react";
 import type { Job, JobViewport, MapTarget } from "@/types";
 import { companyLogoUrl, getJobApplicationLink } from "@/lib/jobs";
@@ -12,10 +12,13 @@ mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ?? "";
 
 const DEFAULT_PITCH = 60;
 const MAX_PITCH = 85;
+const EMPTY_POLYGONS: FeatureCollection<Polygon> = { type: "FeatureCollection", features: [] };
 
 interface MapViewProps {
   jobs: Job[];
   selectedJobId: string | null;
+  highlightedJobId?: string | null;
+  commuteArea?: Feature<Polygon> | null;
   onSelectJob: (job: Job) => void;
   onViewportChange?: (viewport: JobViewport) => void;
   onVisibleCountChange?: (count: number) => void;
@@ -145,6 +148,16 @@ function jobsLabel(n: number): string {
   return `${n} job${n === 1 ? "" : "s"}`;
 }
 
+function hoverCardEl(job: Job): HTMLElement {
+  const card = el("div", "jm-hovercard");
+  card.appendChild(el("span", "jm-hover-company", job.company));
+  card.appendChild(el("span", "jm-hover-title", job.title));
+  card.appendChild(
+    el("span", "jm-hover-meta", [job.salary, job.workType].filter(Boolean).join(" · ") || job.location_label),
+  );
+  return card;
+}
+
 function interactiveMarker(label: string, onClick: () => void): HTMLDivElement {
   const root = el("div", "jm-marker");
   root.setAttribute("role", "button");
@@ -171,6 +184,7 @@ function singlePinEl(place: CompanyPlace, selected: boolean, onClick: () => void
   pin.appendChild(el("span", "jm-name", place.company));
   root.appendChild(pin);
   root.appendChild(el("span", "jm-ground"));
+  if (place.jobs[0]) root.appendChild(hoverCardEl(place.jobs[0]));
   return root;
 }
 
@@ -219,6 +233,7 @@ function fanEl(
     head.appendChild(el("span", "jm-count", String(place.jobs.length)));
     item.appendChild(head);
     item.appendChild(el("span", "jm-fan-name", place.company));
+    if (place.jobs[0]) item.appendChild(hoverCardEl(place.jobs[0]));
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       onPick(place);
@@ -278,6 +293,8 @@ function isTypingTarget(target: EventTarget | null): boolean {
 export default function MapView({
   jobs,
   selectedJobId,
+  highlightedJobId = null,
+  commuteArea = null,
   onSelectJob,
   onViewportChange,
   onVisibleCountChange,
@@ -294,6 +311,7 @@ export default function MapView({
   const onViewportChangeRef = useRef(onViewportChange);
   const onVisibleCountChangeRef = useRef(onVisibleCountChange);
   const onHighlightVisibleReadyRef = useRef(onHighlightVisibleReady);
+  const highlightedJobIdRef = useRef(highlightedJobId);
   const visibleCountRef = useRef(-1);
   const keysRef = useRef<Set<CameraAction>>(new Set());
   const fastRef = useRef(false);
@@ -308,6 +326,7 @@ export default function MapView({
   onViewportChangeRef.current = onViewportChange;
   onVisibleCountChangeRef.current = onVisibleCountChange;
   onHighlightVisibleReadyRef.current = onHighlightVisibleReady;
+  highlightedJobIdRef.current = highlightedJobId;
 
   const openCompany = useCallback((place: CompanyPlace) => {
     const m = map.current;
@@ -426,10 +445,31 @@ export default function MapView({
         .addTo(m);
       markersRef.current.set(key, { marker, sig: candidate.sig });
     }
+
+    const highlightedId = highlightedJobIdRef.current;
+    let highlightedCoords: [number, number] | null = null;
+    if (highlightedId) {
+      for (const place of placesRef.current.values()) {
+        if (place.jobs.some((job) => job.id === highlightedId)) {
+          highlightedCoords = place.coords;
+          break;
+        }
+      }
+    }
+    const highlightedPoint = highlightedCoords ? m.project(highlightedCoords) : null;
+    for (const { marker } of markersRef.current.values()) {
+      const point = m.project(marker.getLngLat());
+      const distance = highlightedPoint ? Math.hypot(point.x - highlightedPoint.x, point.y - highlightedPoint.y) : Infinity;
+      marker.getElement().classList.toggle("jm-hover-target", distance <= 90);
+    }
   }, [openCompany]);
 
   const renderMarkersRef = useRef(renderMarkers);
   renderMarkersRef.current = renderMarkers;
+
+  useEffect(() => {
+    renderMarkersRef.current();
+  }, [highlightedJobId]);
 
   const highlightVisibleMarkers = useCallback(() => {
     const m = map.current;
@@ -551,6 +591,22 @@ export default function MapView({
 
     instance.on("load", () => {
       setIsMapLoaded(true);
+      instance.addSource("commute-area", {
+        type: "geojson",
+        data: commuteArea ?? EMPTY_POLYGONS,
+      });
+      instance.addLayer({
+        id: "commute-area-fill",
+        type: "fill",
+        source: "commute-area",
+        paint: { "fill-color": "#2563eb", "fill-opacity": 0.12 },
+      });
+      instance.addLayer({
+        id: "commute-area-outline",
+        type: "line",
+        source: "commute-area",
+        paint: { "line-color": "#2563eb", "line-width": 2, "line-dasharray": [2, 1] },
+      });
       instance.addSource("jobs", {
         type: "geojson",
         data: placesToGeoJSON(placesRef.current),
@@ -678,8 +734,14 @@ export default function MapView({
     renderMarkersRef.current();
   }, [jobs]);
 
+  useEffect(() => {
+    const source = map.current?.getSource("commute-area") as mapboxgl.GeoJSONSource | undefined;
+    source?.setData(commuteArea ?? EMPTY_POLYGONS);
+  }, [commuteArea, isMapLoaded]);
+
   // ---- Selection: highlight its pin and fly to the building ----
   useEffect(() => {
+    setCompanyPopup(null);
     let selectedPlace: CompanyPlace | null = null;
     if (selectedJobId) {
       for (const place of placesRef.current.values()) {

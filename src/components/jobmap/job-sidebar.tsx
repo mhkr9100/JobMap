@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { Briefcase, Check, ChevronLeft, SlidersHorizontal, X } from "lucide-react";
+import { Briefcase, Check, ChevronLeft, SlidersHorizontal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { jobFunctionCounts } from "@/lib/jobs";
 import type { Job, JobSearchFilters } from "@/types";
@@ -9,15 +9,16 @@ import { INITIAL_JOB_FILTERS } from "@/types";
 
 interface JobSidebarProps {
   jobs: Job[];
+  titleQuery: string;
   filters: JobSearchFilters;
   setFilters: Dispatch<SetStateAction<JobSearchFilters>>;
 }
 
-export default function JobSidebar({ jobs, filters, setFilters }: JobSidebarProps) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
+export default function JobSidebar({ jobs, titleQuery, filters, setFilters }: JobSidebarProps) {
+  const [isCollapsed, setIsCollapsed] = useState(true);
 
-  const functions = useMemo(() => jobFunctionCounts(jobs, filters.title), [jobs, filters.title]);
-  const activeCount = (filters.title.trim() ? 1 : 0) + filters.jobFunctions.length;
+  const functions = useMemo(() => jobFunctionCounts(jobs, titleQuery), [jobs, titleQuery]);
+  const activeCount = filters.jobFunctions.length;
 
   function toggleFunction(fn: string) {
     setFilters((prev) => ({
@@ -33,13 +34,12 @@ export default function JobSidebar({ jobs, filters, setFilters }: JobSidebarProp
       <button
         type="button"
         onClick={() => setIsCollapsed(false)}
-        className="absolute left-6 top-6 z-20 flex items-center gap-2 rounded-full border border-white/40 bg-white/95 px-4 py-2.5 text-slate-800 shadow-2xl backdrop-blur-2xl transition hover:bg-white"
+        className="absolute left-4 top-24 z-20 flex size-12 items-center justify-center rounded-2xl border border-white/50 bg-white/95 text-slate-800 shadow-2xl backdrop-blur-2xl transition hover:bg-white md:left-6 md:top-6"
         aria-label="Open job filters"
       >
         <SlidersHorizontal className="size-4 text-blue-600" />
-        <span className="text-xs font-bold">Filters</span>
         {activeCount > 0 && (
-          <span className="flex size-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">
+          <span className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">
             {activeCount}
           </span>
         )}
@@ -48,7 +48,7 @@ export default function JobSidebar({ jobs, filters, setFilters }: JobSidebarProp
   }
 
   return (
-    <aside className="absolute left-6 top-6 z-20 flex max-h-[calc(100vh-48px)] w-80 flex-col rounded-3xl border border-white/40 bg-white/90 p-5 text-slate-900 shadow-2xl backdrop-blur-2xl">
+    <aside className="absolute left-4 top-24 z-20 flex max-h-[calc(100vh-9rem)] w-64 flex-col rounded-3xl border border-white/50 bg-white/90 p-4 text-slate-900 shadow-2xl backdrop-blur-2xl md:left-6 md:top-6 md:max-h-[calc(100vh-48px)] md:w-72 md:p-5">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-xl bg-blue-600 text-white shadow-md shadow-blue-500/30">
@@ -76,31 +76,6 @@ export default function JobSidebar({ jobs, filters, setFilters }: JobSidebarProp
           </button>
         </div>
       </header>
-
-      <label className="mt-4 block">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-          Job title
-        </span>
-        <div className="relative mt-1.5">
-          <input
-            type="text"
-            value={filters.title}
-            onChange={(e) => setFilters((prev) => ({ ...prev, title: e.target.value }))}
-            placeholder="e.g. nurse, security, engineer"
-            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-3 pr-8 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30"
-          />
-          {filters.title && (
-            <button
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, title: "" }))}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-slate-400 hover:text-slate-700"
-              aria-label="Clear job title"
-            >
-              <X className="size-3.5" />
-            </button>
-          )}
-        </div>
-      </label>
 
       <div className="mt-5 flex items-center justify-between">
         <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">

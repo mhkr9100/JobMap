@@ -10,14 +10,20 @@ export type WorkType = "Remote" | "Hybrid" | "On-site";
 
 /** Job filters: only title and job function (A–Z). */
 export interface JobSearchFilters {
-  title: string;
   jobFunctions: string[];
 }
 
 export const INITIAL_JOB_FILTERS: JobSearchFilters = {
-  title: "",
   jobFunctions: [],
 };
+
+export type CommuteProfile = "driving" | "walking" | "cycling";
+
+export interface CommutePreferences {
+  enabled: boolean;
+  minutes: 15 | 30 | 45 | 60;
+  profile: CommuteProfile;
+}
 
 export interface JobViewport {
   minLng: number;

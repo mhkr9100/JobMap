@@ -179,8 +179,10 @@ def _as_text(value: object, default: str = "") -> str:
 def _get_supabase() -> Client:
     if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
         raise RuntimeError(
-            "Set SUPABASE_URL and SUPABASE_SECRET_KEY before harvesting; "
-            "the jobs table is protected by row-level security."
+            "Supabase credentials are missing. Set SUPABASE_URL and "
+            "SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY) in the local "
+            "environment or GitHub Actions secrets. The publishable/anon key "
+            "cannot write to the jobs table because row-level security protects it."
         )
     return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
@@ -364,6 +366,8 @@ def harvest_and_upload(location: str | None = None) -> int:
     print(f"=== Starting Harvest for Metro: {location} ===")
     client = _get_supabase()
     records_by_hash: dict[str, dict[str, object]] = {}
+    category_failures: list[str] = []
+    category_results = 0
 
     # 1. Harvest free APIs
     free_api_jobs = harvest_free_apis(default_location=location)
@@ -383,10 +387,13 @@ def harvest_and_upload(location: str | None = None) -> int:
             )
         except Exception as error:
             print(f"Scrape failed for {industry}: {error}")
+            category_failures.append(industry)
             continue
 
         if frame is None or frame.empty:
             continue
+
+        category_results += len(frame)
 
         for _, row in frame.iterrows():
             company = _as_text(row.get("company"))
@@ -435,8 +442,20 @@ def harvest_and_upload(location: str | None = None) -> int:
 
     records = list(records_by_hash.values())
     print(f"Total unique candidates to upsert: {len(records)}")
+    print(
+        f"Scraper summary: {len(SEARCH_CATEGORIES) - len(category_failures)} of "
+        f"{len(SEARCH_CATEGORIES)} categories completed; {category_results} "
+        f"scraped rows; {len(category_failures)} category errors."
+    )
+
+    if not records:
+        raise RuntimeError(
+            "Harvest produced no geocoded job records. Check source availability, "
+            "location/geocoding settings, and the per-category messages above."
+        )
 
     uploaded = 0
+    failed_batches = 0
     for start in range(0, len(records), UPLOAD_BATCH_SIZE):
         batch = records[start : start + UPLOAD_BATCH_SIZE]
         try:
@@ -448,6 +467,16 @@ def harvest_and_upload(location: str | None = None) -> int:
                 uploaded += len(batch)
             except Exception as batch_error:
                 print(f"Supabase upsert notice for batch: {batch_error}")
+                failed_batches += 1
+
+    if failed_batches:
+        raise RuntimeError(
+            f"Harvest uploaded {uploaded} of {len(records)} candidate jobs; "
+            f"{failed_batches} Supabase batch(es) failed."
+        )
+
+    if uploaded == 0:
+        raise RuntimeError("Harvest finished without any successful Supabase upserts.")
 
     print(f"Harvest complete: {uploaded} jobs upserted for {location}.")
     return uploaded

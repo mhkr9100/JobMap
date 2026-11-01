@@ -36,6 +36,26 @@ jobs:
       - name: Install harvester dependencies
         run: python -m pip install -r src/scripts/requirements.txt
 
+      - name: Validate harvest credentials
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
+        run: |
+          missing=()
+          [[ -n "$SUPABASE_URL" ]] || missing+=(SUPABASE_URL)
+          if [[ -z "$SUPABASE_SECRET_KEY" && -z "$SUPABASE_SERVICE_ROLE_KEY" ]]; then
+            missing+=(SUPABASE_SECRET_KEY\ or\ SUPABASE_SERVICE_ROLE_KEY)
+          fi
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Add these repository Actions secrets before harvesting: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          if [[ -z "$MAPBOX_ACCESS_TOKEN" ]]; then
+            echo '::warning::MAPBOX_ACCESS_TOKEN is not configured; address geocoding will use the Census fallback.'
+          fi
+
       - name: Harvest and upsert jobs
         run: python src/scripts/harvest_jobs.py
         env:

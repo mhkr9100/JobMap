@@ -105,7 +105,7 @@ export default function MapControls({
   const [showHelp, setShowHelp] = useState(false);
 
   return (
-    <div className="absolute bottom-6 right-6 z-20 flex flex-col items-end gap-2">
+    <div className="absolute bottom-24 left-4 z-20 flex flex-col items-start gap-2 md:left-6">
       {showHelp && (
         <div className="w-64 rounded-2xl border border-white/40 bg-white/95 p-3 text-xs shadow-2xl backdrop-blur-2xl">
           <p className="mb-2 font-bold text-slate-800">Map controls</p>

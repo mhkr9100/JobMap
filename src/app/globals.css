@@ -149,6 +149,7 @@
 
 /* Mapbox DOM job markers: clear job counts, company stacks, and subtle motion. */
 .jm-marker {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -355,6 +356,66 @@
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.jm-hovercard {
+  position: absolute;
+  z-index: 10;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  display: flex;
+  width: 230px;
+  max-width: min(230px, calc(100vw - 2rem));
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  transform: translate(-50%, 5px);
+  border: 1px solid rgb(255 255 255 / 75%);
+  border-radius: 14px;
+  background: rgb(15 23 42 / 94%);
+  box-shadow: 0 10px 30px rgb(15 23 42 / 28%);
+  color: white;
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 140ms ease, opacity 140ms ease;
+}
+.jm-marker:hover .jm-hovercard,
+.jm-marker:focus-visible .jm-hovercard,
+.jm-fan-item:hover .jm-hovercard,
+.jm-fan-item:focus-visible .jm-hovercard {
+  transform: translate(-50%, 0);
+  opacity: 1;
+}
+.jm-hover-company {
+  color: #bfdbfe;
+  font-size: 10px;
+  font-weight: 800;
+}
+.jm-hover-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.jm-hover-meta {
+  overflow: hidden;
+  color: #cbd5e1;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jm-marker.jm-hover-target .jm-pin-head,
+.jm-marker.jm-hover-target .jm-cluster {
+  outline: 3px solid #38bdf8;
+  outline-offset: 3px;
+  filter: drop-shadow(0 0 8px rgb(56 189 248 / 75%));
+}
+.job-result-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 102px;
 }
 .jm-marker.jm-highlight .jm-pin,
 .jm-marker.jm-highlight .jm-cluster {

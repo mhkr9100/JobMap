@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Building2, GraduationCap, Landmark, Loader2, MapPin, Search, X } from "lucide-react";
+import { Briefcase, Building2, CarFront, GraduationCap, Landmark, Loader2, MapPin, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { MapTarget } from "@/types";
+import type { CommutePreferences, MapTarget } from "@/types";
 
 /**
  * Location-only search: cities, states, neighborhoods, addresses and every kind of
@@ -57,8 +57,14 @@ interface PhotonFeature {
 }
 
 interface LocationSearchProps {
+  roleQuery: string;
+  onRoleQueryChange: (value: string) => void;
   onLocationSelected: (target: Omit<MapTarget, "nonce">, name: string) => void;
   proximity?: [number, number] | null;
+  commute: CommutePreferences;
+  commuteOrigin: string | null;
+  commuteLoading: boolean;
+  onCommuteChange: (preferences: CommutePreferences) => void;
 }
 
 const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ?? "";
@@ -191,12 +197,22 @@ const KIND_LABEL: Record<PlaceKind, string> = {
   org: "Organization",
 };
 
-export default function LocationSearch({ onLocationSelected, proximity }: LocationSearchProps) {
+export default function LocationSearch({
+  roleQuery,
+  onRoleQueryChange,
+  onLocationSelected,
+  proximity,
+  commute,
+  commuteOrigin,
+  commuteLoading,
+  onCommuteChange,
+}: LocationSearchProps) {
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState<PlaceSuggestion[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [isCommuteOpen, setIsCommuteOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const sessionRef = useRef<string>(newSessionToken());
@@ -315,44 +331,69 @@ export default function LocationSearch({ onLocationSelected, proximity }: Locati
   }
 
   return (
-    <div ref={containerRef} className="absolute right-6 top-6 z-30 w-[min(26rem,calc(100vw-3rem))]">
-      <div className="relative">
-        <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
-          {isLoading ? (
-            <Loader2 className="size-4 animate-spin text-blue-500" />
-          ) : (
-            <Search className="size-4" />
+    <div
+      ref={containerRef}
+      className="absolute left-1/2 top-4 z-30 w-[min(66rem,calc(100vw-5rem))] -translate-x-1/2 md:top-6 md:w-[min(66rem,calc(100vw-4rem))]"
+    >
+      <div className="flex items-center rounded-2xl border border-white/50 bg-white/95 p-1.5 shadow-2xl backdrop-blur-2xl sm:rounded-full sm:p-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 px-2 sm:px-3">
+          <Briefcase className="size-4 shrink-0 text-slate-400" />
+          <input
+            type="search"
+            value={roleQuery}
+            onFocus={() => setIsOpen(false)}
+            onChange={(event) => onRoleQueryChange(event.target.value)}
+            placeholder="Role or keyword"
+            aria-label="Search jobs by role or keyword"
+            className="min-w-0 flex-1 bg-transparent py-2 text-sm font-medium text-slate-900 outline-none placeholder:text-slate-400"
+          />
+          {roleQuery && (
+            <button
+              type="button"
+              onClick={() => onRoleQueryChange("")}
+              className="rounded-full p-0.5 text-slate-400 hover:text-slate-700"
+              aria-label="Clear role search"
+            >
+              <X className="size-4" />
+            </button>
           )}
         </div>
-        <input
-          ref={inputRef}
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onFocus={() => results.length > 0 && setIsOpen(true)}
-          onKeyDown={handleKeyDown}
-          placeholder="Search a city, state, university, company…"
-          aria-label="Search locations"
-          className="w-full rounded-full border border-white/40 bg-white/95 py-3 pl-11 pr-10 text-sm font-medium text-slate-900 shadow-2xl backdrop-blur-2xl outline-none transition placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/50"
-        />
-        {query && (
-          <button
-            type="button"
-            onClick={() => {
-              setQuery("");
-              setResults([]);
-              setIsOpen(false);
-              inputRef.current?.focus();
-            }}
-            className="absolute right-3.5 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-slate-400 hover:text-slate-700"
-            aria-label="Clear search"
-          >
-            <X className="size-4" />
-          </button>
-        )}
 
-        {isOpen && results.length > 0 && (
-          <ul className="absolute right-0 top-full mt-2 max-h-96 w-full overflow-y-auto rounded-2xl border border-white/40 bg-white/95 p-1.5 shadow-2xl backdrop-blur-2xl">
+        <div className="mx-1 h-7 w-px shrink-0 bg-slate-200" />
+
+        <div className="relative flex min-w-0 flex-[1.15] items-center gap-2 px-2 sm:px-3">
+          <div className="pointer-events-none text-slate-400">
+            {isLoading ? <Loader2 className="size-4 animate-spin text-blue-500" /> : <MapPin className="size-4" />}
+          </div>
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => results.length > 0 && setIsOpen(true)}
+            onKeyDown={handleKeyDown}
+            placeholder="City, campus, company…"
+            aria-label="Search locations and organizations"
+            className="min-w-0 flex-1 bg-transparent py-2 text-sm font-medium text-slate-900 outline-none placeholder:text-slate-400"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                setResults([]);
+                setIsOpen(false);
+                inputRef.current?.focus();
+              }}
+              className="rounded-full p-0.5 text-slate-400 hover:text-slate-700"
+              aria-label="Clear location search"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+
+          {isOpen && results.length > 0 && (
+            <ul className="absolute right-0 top-full z-40 mt-3 max-h-96 w-[min(30rem,calc(100vw-5rem))] overflow-y-auto rounded-2xl border border-white/50 bg-white/95 p-1.5 shadow-2xl backdrop-blur-2xl">
             {results.map((place, i) => (
               <li key={`${place.id}-${i}`}>
                 <button
@@ -389,8 +430,80 @@ export default function LocationSearch({ onLocationSelected, proximity }: Locati
                 </button>
               </li>
             ))}
-          </ul>
-        )}
+            </ul>
+          )}
+        </div>
+
+        <div className="relative ml-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setIsOpen(false);
+              setIsCommuteOpen((open) => !open);
+            }}
+            aria-expanded={isCommuteOpen}
+            aria-label="Commute time filter"
+            className={cn(
+              "flex items-center gap-1.5 rounded-xl px-2.5 py-2 text-xs font-bold transition sm:rounded-full sm:px-3",
+              commute.enabled ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200",
+            )}
+          >
+            {commuteLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CarFront className="size-3.5" />}
+            <span className="hidden sm:inline">
+              {commute.enabled ? `${commute.minutes} min ${commute.profile === "driving" ? "drive" : commute.profile}` : "Commute"}
+            </span>
+          </button>
+
+          {isCommuteOpen && (
+            <div className="absolute right-0 top-full z-40 mt-3 w-72 rounded-2xl border border-white/50 bg-white/95 p-4 text-slate-900 shadow-2xl backdrop-blur-2xl">
+              <p className="text-sm font-bold">Commute time</p>
+              <p className="mt-1 text-xs text-slate-500">
+                {commuteOrigin ? `From ${commuteOrigin}` : "Search and select a location to set your origin."}
+              </p>
+              <label className="mt-3 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                Travel mode
+                <select
+                  value={commute.profile}
+                  onChange={(event) => onCommuteChange({ ...commute, profile: event.target.value as CommutePreferences["profile"] })}
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium normal-case text-slate-800 outline-none focus:border-blue-500"
+                >
+                  <option value="driving">Driving</option>
+                  <option value="walking">Walking</option>
+                  <option value="cycling">Cycling</option>
+                </select>
+              </label>
+              <div className="mt-3 flex gap-1.5">
+                {([15, 30, 45, 60] as const).map((minutes) => (
+                  <button
+                    key={minutes}
+                    type="button"
+                    onClick={() => onCommuteChange({ ...commute, minutes })}
+                    className={cn(
+                      "flex-1 rounded-lg py-2 text-xs font-bold transition",
+                      commute.minutes === minutes ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200",
+                    )}
+                  >
+                    {minutes}m
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={!commuteOrigin || commuteLoading}
+                onClick={() => {
+                  onCommuteChange({ ...commute, enabled: !commute.enabled });
+                  setIsCommuteOpen(false);
+                }}
+                className="mt-3 w-full rounded-xl bg-slate-900 px-3 py-2.5 text-sm font-bold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {commute.enabled ? "Remove commute filter" : "Show jobs in commute area"}
+              </button>
+              <p className="mt-2 text-[10px] leading-4 text-slate-400">
+                Transit routing isn’t available from this map provider. Estimates use typical travel times.
+              </p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

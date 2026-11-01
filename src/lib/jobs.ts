@@ -1,6 +1,8 @@
 export type { Job, JobSearchFilters, JobStatus, WorkType } from "@/types";
 
 import type { Job, JobSearchFilters } from "@/types";
+import type { Feature, Polygon } from "geojson";
+import { isJobInCommuteArea } from "@/lib/commute";
 
 const INACTIVE_STATUSES = new Set(["Inactive", "Expired", "Closed", "Rejected"]);
 
@@ -128,13 +130,19 @@ export function isActiveJob(job: Job): boolean {
   return !INACTIVE_STATUSES.has(job.status ?? "Available");
 }
 
-export function filterJobs(jobs: Job[], filters: JobSearchFilters): Job[] {
-  const title = filters.title.trim().toLowerCase();
+export function filterJobs(
+  jobs: Job[],
+  filters: JobSearchFilters,
+  titleFilter = "",
+  commuteArea?: Feature<Polygon> | null,
+): Job[] {
+  const title = titleFilter.trim().toLowerCase();
   const functions = new Set(filters.jobFunctions);
   return jobs.filter((job) => {
     if (!isActiveJob(job)) return false;
     if (title && !job.title.toLowerCase().includes(title)) return false;
     if (functions.size > 0 && !functions.has(job.jobFunction ?? "Other")) return false;
+    if (commuteArea && !isJobInCommuteArea(job, commuteArea)) return false;
     return true;
   });
 }
