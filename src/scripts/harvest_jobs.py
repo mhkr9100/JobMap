@@ -16,6 +16,7 @@ import hashlib
 import math
 import os
 import re
+import struct
 import unicodedata
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -175,6 +176,29 @@ def _site_coordinates(value: object) -> list[float] | None:
         match = _POINT_PATTERN.search(value)
         if match:
             return [float(match.group(1)), float(match.group(2))]
+        # PostgREST serializes PostGIS geography columns as EWKB hex. Decode
+        # standard Point values so exact organization-site matches can be used.
+        try:
+            raw = bytes.fromhex(value)
+        except ValueError:
+            raw = b""
+        if len(raw) >= 21 and raw[0] in (0, 1):
+            byte_order = "<" if raw[0] == 1 else ">"
+            geometry_type = struct.unpack_from(f"{byte_order}I", raw, 1)[0]
+            has_srid = bool(geometry_type & 0x20000000)
+            has_z = bool(geometry_type & 0x80000000)
+            has_m = bool(geometry_type & 0x40000000)
+            if geometry_type & 0xFFFF == 1:
+                offset = 1 + 4
+                if has_srid:
+                    srid = struct.unpack_from(f"{byte_order}I", raw, offset)[0]
+                    if srid != 4326:
+                        return None
+                    offset += 4
+                if len(raw) >= offset + 16:
+                    lng, lat = struct.unpack_from(f"{byte_order}dd", raw, offset)
+                    if math.isfinite(lng) and math.isfinite(lat):
+                        return [lng, lat]
     if isinstance(value, Mapping):
         coordinates = value.get("coordinates")
         if isinstance(coordinates, (list, tuple)) and len(coordinates) >= 2:
@@ -183,6 +207,14 @@ def _site_coordinates(value: object) -> list[float] | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _postgis_point(coords: list[float] | tuple[float, float]) -> str:
+    """Encode longitude/latitude in the WKT form accepted by PostGIS columns."""
+    lng, lat = float(coords[0]), float(coords[1])
+    if not (math.isfinite(lng) and math.isfinite(lat) and -180 <= lng <= 180 and -90 <= lat <= 90):
+        raise ValueError("Point coordinates must be finite longitude/latitude values.")
+    return f"POINT({lng:.12f} {lat:.12f})"
 
 
 def _street_fingerprint(value: object) -> tuple[str, tuple[str, ...]] | None:
@@ -482,7 +514,7 @@ def harvest_and_upload(location: str | None = None) -> int:
                 "company": company,
                 "location_label": location_label,
                 "source_location": location_label,
-                "location": {"type": "Point", "coordinates": coords},
+                "location": _postgis_point(coords),
                 "coords": coords,
                 "location_precision": "approximate",
                 "salary": salary_text or "Not Listed",
@@ -561,7 +593,7 @@ def harvest_and_upload(location: str | None = None) -> int:
         if not coords or not _within_launch_radius(coords):
             continue
         job["site_id"] = str(site["id"])
-        job["location"] = {"type": "Point", "coordinates": coords}
+        job["location"] = _postgis_point(coords)
         job["coords"] = coords
         job["location_label"] = str(site.get("address") or job["location_label"])
         job["location_precision"] = str(site["location_precision"])

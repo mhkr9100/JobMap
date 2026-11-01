@@ -23,6 +23,7 @@ from harvest_jobs import (
     LAUNCH_CENTER,
     UPLOAD_BATCH_SIZE,
     _normalized_text,
+    _postgis_point,
     _within_launch_radius,
 )
 
@@ -183,7 +184,7 @@ def import_geojson(path: Path, source: str) -> tuple[int, int]:
             "city": item["city"],
             "region": item["region"],
             "postal_code": item["postal_code"],
-            "location": {"type": "Point", "coordinates": item["coords"]},
+            "location": _postgis_point(item["coords"]),
             "location_precision": item["precision"],
             "confidence": item["confidence"],
             "source": source,
