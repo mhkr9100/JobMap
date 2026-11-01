@@ -193,8 +193,11 @@ function hoverCardEl(job: Job): HTMLElement {
 function interactiveMarker(label: string, onClick: () => void): HTMLDivElement {
   const root = el("div", "jm-marker");
   root.setAttribute("role", "button");
-  root.setAttribute("tabindex", "0");
+  root.setAttribute("tabindex", "-1");
   root.setAttribute("aria-label", label);
+  root.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+  });
   root.addEventListener("click", onClick);
   root.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -267,6 +270,9 @@ function fanEl(
     item.appendChild(head);
     item.appendChild(el("span", "jm-fan-name", place.company));
     if (place.jobs[0]) item.appendChild(hoverCardEl(place.jobs[0]));
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+    });
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       onPick(place);
@@ -867,15 +873,24 @@ export default function MapView({
   const placeBelow = popup ? popup.point.y < 420 : false;
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-slate-900">
-      <div ref={mapContainer} className="h-full w-full" />
-
-      {jobs.some((job) => job.locationPrecision === "approximate") && (
-          <div className="pointer-events-none absolute left-1/2 top-24 z-10 -translate-x-1/2 rounded-2xl border border-white/50 bg-white/90 px-4 py-3 text-center shadow-xl backdrop-blur-lg">
-            <p className="text-sm font-semibold text-slate-800">{jobs.filter((job) => job.locationPrecision === "approximate").length.toLocaleString()} jobs need a building-verified employer site</p>
-            <p className="mt-1 text-xs text-slate-500">City-level job-board points stay in the results list until matched to a verified employer building or site.</p>
-          </div>
-        )}
+    <div
+      onScroll={(event) => {
+        event.currentTarget.scrollTop = 0;
+        event.currentTarget.scrollLeft = 0;
+      }}
+      onWheel={(event) => {
+        if (event.ctrlKey && map.current) {
+          event.preventDefault();
+          const nextZoom = Math.max(
+            MIN_FLIGHT_ZOOM,
+            Math.min(MAX_FLIGHT_ZOOM, map.current.getZoom() - event.deltaY * 0.01),
+          );
+          map.current.zoomTo(nextZoom, { duration: 0 });
+        }
+      }}
+      className="relative h-full w-full overflow-clip bg-slate-900"
+    >
+      <div ref={mapContainer} className="h-full w-full overflow-clip" />
 
       {flightView !== "cockpit" && (
         <div

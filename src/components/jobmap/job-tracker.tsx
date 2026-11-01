@@ -267,8 +267,40 @@ export default function JobTracker() {
     if (!next.enabled) setCommuteError(null);
   }
 
+  useEffect(() => {
+    const preventBrowserPinch = (event: WheelEvent) => {
+      if (event.ctrlKey) {
+        event.preventDefault();
+      }
+    };
+    const preventGesture = (event: Event) => {
+      event.preventDefault();
+    };
+    const resetViewportScroll = () => {
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0);
+      }
+    };
+    window.addEventListener("wheel", preventBrowserPinch, { passive: false });
+    window.addEventListener("gesturestart", preventGesture, { passive: false });
+    window.addEventListener("gesturechange", preventGesture, { passive: false });
+    window.addEventListener("scroll", resetViewportScroll, { passive: true });
+    return () => {
+      window.removeEventListener("wheel", preventBrowserPinch);
+      window.removeEventListener("gesturestart", preventGesture);
+      window.removeEventListener("gesturechange", preventGesture);
+      window.removeEventListener("scroll", resetViewportScroll);
+    };
+  }, []);
+
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-slate-900">
+    <div
+      onScroll={(event) => {
+        event.currentTarget.scrollTop = 0;
+        event.currentTarget.scrollLeft = 0;
+      }}
+      className="fixed inset-0 h-dvh w-dvw overflow-clip bg-slate-900 select-none"
+    >
       <MapView
         jobs={filteredJobs}
         selectedJobId={selectedJobId}
