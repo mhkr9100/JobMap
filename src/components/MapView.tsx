@@ -6,12 +6,21 @@ import type { Feature, FeatureCollection, Point, Polygon } from "geojson";
 import { ExternalLink, MapPin, X } from "lucide-react";
 import type { Job, JobViewport, MapTarget } from "@/types";
 import { companyLogoUrl, getJobApplicationLink } from "@/lib/jobs";
-import MapControls, { type CameraAction } from "@/components/jobmap/map-controls";
+import MapControls, { type CameraAction, type FlightCameraView } from "@/components/jobmap/map-controls";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ?? "";
 
 const DEFAULT_PITCH = 60;
 const MAX_PITCH = 85;
+const MIN_FLIGHT_ZOOM = 11.8;
+const MAX_FLIGHT_ZOOM = 18;
+const ST_LOUIS_CENTER: [number, number] = [-90.1994, 38.627];
+// A 50-mile circle is enforced in SQL. The rectangular map bound prevents
+// flying far outside that launch region while keeping camera movement cheap.
+const ST_LOUIS_FLIGHT_BOUNDS: [[number, number], [number, number]] = [
+  [-91.14, 37.904],
+  [-89.26, 39.35],
+];
 const EMPTY_POLYGONS: FeatureCollection<Polygon> = { type: "FeatureCollection", features: [] };
 
 interface MapViewProps {
@@ -34,6 +43,7 @@ interface CompanyPlace {
   building: string;
   logo: string | null;
   jobs: Job[];
+  precision: "building" | "address" | "approximate";
 }
 
 interface PlaceProps {
@@ -77,8 +87,9 @@ function buildPlaces(jobs: Job[]): Map<string, CompanyPlace> {
         company: job.company,
         coords: job.coords,
         building,
-        logo: companyLogoUrl(job.company, job.application_url),
+        logo: job.logoUrl ?? companyLogoUrl(job.company, job.application_url),
         jobs: [],
+        precision: job.locationPrecision ?? "approximate",
       };
       places.set(id, place);
     }
@@ -173,9 +184,10 @@ function interactiveMarker(label: string, onClick: () => void): HTMLDivElement {
 }
 
 function singlePinEl(place: CompanyPlace, selected: boolean, onClick: () => void): HTMLElement {
-  const root = interactiveMarker(`${place.company}, ${jobsLabel(place.jobs.length)}`, onClick);
+  const accuracy = place.precision === "building" ? "verified building" : place.precision === "address" ? "verified address" : "approximate listing area";
+  const root = interactiveMarker(`${place.company}, ${jobsLabel(place.jobs.length)}, ${accuracy}`, onClick);
   const pin = el("div", `jm-pin${selected ? " jm-selected" : ""}`);
-  pin.title = `${place.company} — ${jobsLabel(place.jobs.length)}`;
+  pin.title = `${place.company} — ${jobsLabel(place.jobs.length)} · ${accuracy}`;
   const head = el("div", "jm-pin-head");
   head.appendChild(logoEl(place, 30));
   head.appendChild(el("span", "jm-count", String(place.jobs.length)));
@@ -303,7 +315,7 @@ export default function MapView({
 }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
-  const placesRef = useRef<Map<string, CompanyPlace>>(buildPlaces(jobs));
+  const placesRef = useRef<Map<string, CompanyPlace>>(new Map());
   const markersRef = useRef<Map<string, MarkerEntry>>(new Map());
   const expandedBuildingRef = useRef<string | null>(null);
   const selectedPlaceIdRef = useRef<string | null>(null);
@@ -318,6 +330,8 @@ export default function MapView({
   const rafRef = useRef<number | null>(null);
   const lastMarkerRender = useRef(0);
   const compassRef = useRef<HTMLSpanElement | null>(null);
+  const aircraftRef = useRef<HTMLSpanElement | null>(null);
+  const [flightView, setFlightView] = useState<FlightCameraView>("chase-close");
   const [companyPopup, setCompanyPopup] = useState<CompanyPopupState | null>(null);
   const [is3D, setIs3D] = useState(true);
   const [isMapLoaded, setIsMapLoaded] = useState(false);
@@ -333,7 +347,7 @@ export default function MapView({
     if (!m) return;
     m.easeTo({
       center: place.coords,
-      zoom: Math.max(m.getZoom(), 17),
+      zoom: Math.min(MAX_FLIGHT_ZOOM, Math.max(m.getZoom(), 17)),
       pitch: DEFAULT_PITCH,
       duration: 850,
       essential: true,
@@ -520,6 +534,7 @@ export default function MapView({
     let zoom = m.getZoom();
     if (keys.has("zoomIn")) zoom += 0.035 * fast;
     if (keys.has("zoomOut")) zoom -= 0.035 * fast;
+    zoom = Math.max(MIN_FLIGHT_ZOOM, Math.min(MAX_FLIGHT_ZOOM, zoom));
 
     let center = m.getCenter();
     if (dx || dy) {
@@ -551,6 +566,18 @@ export default function MapView({
     m.easeTo({ pitch: m.getPitch() > 10 ? 0 : DEFAULT_PITCH, duration: 700 });
   }, []);
 
+  const setFlightCameraView = useCallback((view: FlightCameraView) => {
+    const m = map.current;
+    if (!m) return;
+    setFlightView(view);
+    const camera = {
+      cockpit: { pitch: 42, zoom: 15.4 },
+      "chase-close": { pitch: 62, zoom: 14.2 },
+      "chase-far": { pitch: 66, zoom: 12.6 },
+    }[view];
+    m.easeTo({ ...camera, duration: 650, essential: true });
+  }, []);
+
   // ---- Map initialisation ----
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
@@ -558,11 +585,14 @@ export default function MapView({
     const instance = new mapboxgl.Map({
       container: mapContainer.current,
       style: "mapbox://styles/mapbox/standard",
-      center: [-90.1994, 38.627],
-      zoom: 11.5,
+      center: ST_LOUIS_CENTER,
+      zoom: 14,
       pitch: DEFAULT_PITCH,
       bearing: -20,
       maxPitch: MAX_PITCH,
+      minZoom: MIN_FLIGHT_ZOOM,
+      maxZoom: MAX_FLIGHT_ZOOM,
+      maxBounds: ST_LOUIS_FLIGHT_BOUNDS,
       antialias: true,
       keyboard: false, // replaced by the game-style controls below
       dragRotate: true,
@@ -651,6 +681,9 @@ export default function MapView({
       if (compassRef.current) {
         compassRef.current.style.transform = `rotate(${-instance.getBearing()}deg)`;
       }
+      if (aircraftRef.current) {
+        aircraftRef.current.style.transform = `translate(-50%, -50%) rotate(${instance.getBearing()}deg)`;
+      }
     });
     instance.on("pitchend", () => setIs3D(instance.getPitch() > 10));
 
@@ -722,7 +755,7 @@ export default function MapView({
 
   // ---- Data updates ----
   useEffect(() => {
-    placesRef.current = buildPlaces(jobs);
+    placesRef.current = buildPlaces(jobs.filter((job) => job.locationPrecision !== "approximate"));
     const m = map.current;
     const source = m?.getSource("jobs") as mapboxgl.GeoJSONSource | undefined;
     source?.setData(placesToGeoJSON(placesRef.current));
@@ -756,7 +789,7 @@ export default function MapView({
     if (selectedPlace && map.current) {
       map.current.flyTo({
         center: selectedPlace.coords,
-        zoom: Math.max(map.current.getZoom(), 17),
+      zoom: Math.min(MAX_FLIGHT_ZOOM, Math.max(map.current.getZoom(), 17)),
         pitch: DEFAULT_PITCH,
         duration: 1400,
         essential: true,
@@ -769,13 +802,14 @@ export default function MapView({
     const m = map.current;
     if (!m || !isMapLoaded || !target) return;
     setCompanyPopup(null);
-    if (target.bbox && target.zoom <= 13.5) {
-      m.fitBounds(target.bbox, { padding: 80, pitch: 45, maxZoom: target.zoom + 1, duration: 1600 });
+    const targetZoom = Math.max(MIN_FLIGHT_ZOOM, Math.min(MAX_FLIGHT_ZOOM, target.zoom));
+    if (target.bbox && targetZoom <= 13.5) {
+      m.fitBounds(target.bbox, { padding: 80, pitch: 45, maxZoom: Math.min(MAX_FLIGHT_ZOOM, targetZoom + 1), duration: 1600 });
     } else {
       m.flyTo({
         center: target.center,
-        zoom: target.zoom,
-        pitch: target.zoom >= 15 ? DEFAULT_PITCH : 45,
+        zoom: targetZoom,
+        pitch: targetZoom >= 15 ? DEFAULT_PITCH : 45,
         duration: 1800,
         essential: true,
       });
@@ -790,6 +824,29 @@ export default function MapView({
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-900">
       <div ref={mapContainer} className="h-full w-full" />
+
+      {jobs.some((job) => job.locationPrecision === "approximate") && (
+          <div className="pointer-events-none absolute left-1/2 top-24 z-10 -translate-x-1/2 rounded-2xl border border-white/50 bg-white/90 px-4 py-3 text-center shadow-xl backdrop-blur-lg">
+            <p className="text-sm font-semibold text-slate-800">{jobs.filter((job) => job.locationPrecision === "approximate").length.toLocaleString()} local jobs need a verified employer site</p>
+            <p className="mt-1 text-xs text-slate-500">Approximate job-board locations are kept in the results list, not shown as building pins.</p>
+          </div>
+        )}
+
+      <div
+        className={`pointer-events-none absolute left-1/2 z-[5] flex -translate-x-1/2 items-center justify-center ${flightView === "cockpit" ? "bottom-[28%]" : "bottom-[21%]"}`}
+        aria-hidden="true"
+      >
+        <span
+          ref={aircraftRef}
+          className="text-3xl text-slate-900 drop-shadow-[0_2px_4px_rgba(255,255,255,0.95)]"
+          style={{ transform: "translate(-50%, -50%) rotate(-20deg)" }}
+        >✈</span>
+      </div>
+      {flightView === "cockpit" && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[4] flex h-24 items-end justify-center bg-gradient-to-t from-slate-950/45 to-transparent pb-3">
+          <div className="rounded-full border border-white/35 bg-slate-950/55 px-4 py-1.5 font-mono text-[10px] tracking-[0.18em] text-white shadow-lg backdrop-blur-sm">FLIGHT VIEW · ST. LOUIS</div>
+        </div>
+      )}
 
       {popup && (
         <div
@@ -884,6 +941,7 @@ export default function MapView({
         onHold={hold}
         onResetNorth={resetNorth}
         onToggle3D={toggle3D}
+        onCameraViewChange={setFlightCameraView}
         is3D={is3D}
         compassRef={compassRef}
       />

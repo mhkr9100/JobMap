@@ -31,10 +31,13 @@ export type CameraAction =
   | "zoomIn"
   | "zoomOut";
 
+export type FlightCameraView = "cockpit" | "chase-close" | "chase-far";
+
 interface MapControlsProps {
   onHold: (action: CameraAction, active: boolean) => void;
   onResetNorth: () => void;
   onToggle3D: () => void;
+  onCameraViewChange: (view: FlightCameraView) => void;
   is3D: boolean;
   compassRef: RefObject<HTMLSpanElement | null>;
 }
@@ -99,6 +102,7 @@ export default function MapControls({
   onHold,
   onResetNorth,
   onToggle3D,
+  onCameraViewChange,
   is3D,
   compassRef,
 }: MapControlsProps) {
@@ -205,6 +209,19 @@ export default function MapControls({
               <Keyboard className="size-4" />
             </button>
           </div>
+          <label className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-xl">
+            Camera
+            <select
+              defaultValue="chase-close"
+              aria-label="Flight camera view"
+              onChange={(event) => onCameraViewChange(event.target.value as FlightCameraView)}
+              className="max-w-28 bg-transparent outline-none"
+            >
+              <option value="cockpit">Cockpit</option>
+              <option value="chase-close">Close chase</option>
+              <option value="chase-far">Far chase</option>
+            </select>
+          </label>
         </div>
       </div>
     </div>

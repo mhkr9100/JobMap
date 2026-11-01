@@ -47,9 +47,14 @@ export interface Job {
   title: string;
   location_label: string;
   coords: [number, number];
-  status?: JobStatus;
+  status: JobStatus;
   salary: string;
   workType: WorkType;
+  /** Evidence quality for the mapped worksite; unknown postings stay approximate. */
+  locationPrecision?: "building" | "address" | "approximate";
+  organizationId?: string;
+  siteId?: string;
+  logoUrl?: string;
   description?: string;
   initials?: string;
   color?: string;

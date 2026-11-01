@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Feature, Polygon } from "geojson";
 import MapView from "@/components/MapView";
 import JobSidebar from "@/components/jobmap/job-sidebar";
@@ -10,6 +10,7 @@ import LocationSearch from "@/components/LocationSearch";
 import { filterJobs, isActiveJob, mapSupabaseJob } from "@/lib/jobs";
 import { getCommuteArea, getCommuteBounds, isJobInCommuteArea } from "@/lib/commute";
 import { supabase } from "@/lib/supabase";
+import { geocodeAddress } from "@/lib/geocoder";
 import type { CommutePreferences, Job, JobSearchFilters, JobViewport, MapTarget } from "@/types";
 import { INITIAL_JOB_FILTERS } from "@/types";
 
@@ -49,9 +50,30 @@ export default function JobTracker() {
   const [commuteResult, setCommuteResult] = useState<{ key: string; area: Feature<Polygon> } | null>(null);
   const [commuteLoading, setCommuteLoading] = useState(false);
   const [commuteError, setCommuteError] = useState<string | null>(null);
+  const [showLocationPrompt, setShowLocationPrompt] = useState(false);
+  const [startLocation, setStartLocation] = useState("");
+  const [locationPromptError, setLocationPromptError] = useState("");
+  const [locationPromptLoading, setLocationPromptLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const latestRequest = useRef(0);
   const highlightVisible = useRef<() => void>(() => undefined);
+
+  useEffect(() => {
+    if (window.localStorage.getItem("jobmap-location-start-v1") !== "done") {
+      setShowLocationPrompt(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void supabase.auth.getUser().then(({ data }) => {
+      if (!cancelled && data.user && window.sessionStorage.getItem("jobmap-map-open-tracked") !== "done") {
+        void supabase.from("analytics_events").insert({ user_id: data.user.id, event_name: "map_open" });
+        window.sessionStorage.setItem("jobmap-map-open-tracked", "done");
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const commuteKey = areaKey(commuteOrigin, commute);
   const commuteArea = commute.enabled && commuteKey && commuteResult?.key === commuteKey
@@ -164,6 +186,82 @@ export default function JobTracker() {
     setCommuteOrigin({ coords: next.center, name });
   }
 
+  function finishLocationStart(coords: [number, number], name: string) {
+    const [lng, lat] = coords;
+    const centerLng = -90.1994;
+    const centerLat = 38.627;
+    const toRad = (degrees: number) => (degrees * Math.PI) / 180;
+    const dLat = toRad(lat - centerLat);
+    const dLng = toRad(lng - centerLng);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(centerLat)) * Math.cos(toRad(lat)) * Math.sin(dLng / 2) ** 2;
+    const distanceMeters = 6_371_008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    if (distanceMeters > 80_467.2) {
+      setLocationPromptError("JobMap is launching in St. Louis and the surrounding 50 miles. Choose a location in that area.");
+      return;
+    }
+    selectLocation({ center: coords, zoom: 15.2 }, name);
+    window.localStorage.setItem("jobmap-location-start-v1", "done");
+    setShowLocationPrompt(false);
+    setLocationPromptError("");
+  }
+
+  function exploreStLouis() {
+    // A small randomized start inside the central city keeps the first view at
+    // building scale without suggesting a fake employer worksite.
+    const angle = Math.random() * Math.PI * 2;
+    const radiusKm = Math.sqrt(Math.random()) * 3.5;
+    const lat = 38.627 + (Math.sin(angle) * radiusKm) / 111.32;
+    const lng = -90.1994 + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((38.627 * Math.PI) / 180));
+    finishLocationStart([lng, lat], "St. Louis, MO");
+  }
+
+  async function submitStartingLocation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = startLocation.trim();
+    if (!query) return;
+    setLocationPromptLoading(true);
+    setLocationPromptError("");
+    try {
+      const coords = await geocodeAddress(query);
+      if (!coords) {
+        setLocationPromptError("I could not find that place. Try a city and state or a street address.");
+      } else {
+        // City-only entries begin at a nearby randomized point. A street
+        // address is kept exact; neither path changes a job's stored location.
+        const hasStreetNumber = /\b\d{1,6}\b/.test(query);
+        if (hasStreetNumber) finishLocationStart(coords, query);
+        else {
+          const angle = Math.random() * Math.PI * 2;
+          const radiusKm = Math.sqrt(Math.random()) * 1.2;
+          const lat = coords[1] + (Math.sin(angle) * radiusKm) / 111.32;
+          const lng = coords[0] + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((coords[1] * Math.PI) / 180));
+          finishLocationStart([lng, lat], query);
+        }
+      }
+    } finally {
+      setLocationPromptLoading(false);
+    }
+  }
+
+  function startAtCurrentLocation() {
+    if (!navigator.geolocation) {
+      setLocationPromptError("This browser does not provide location access. Enter a city or address instead.");
+      return;
+    }
+    setLocationPromptLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        finishLocationStart([coords.longitude, coords.latitude], "Your location");
+        setLocationPromptLoading(false);
+      },
+      () => {
+        setLocationPromptError("Location access was unavailable. Enter a city or address instead.");
+        setLocationPromptLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+    );
+  }
+
   function setCommutePreferences(next: CommutePreferences) {
     setCommute(next);
     if (!next.enabled) setCommuteError(null);
@@ -176,7 +274,14 @@ export default function JobTracker() {
         selectedJobId={selectedJobId}
         highlightedJobId={highlightedJobId}
         commuteArea={commuteArea}
-        onSelectJob={(job) => setSelectedJobId(job.id)}
+        onSelectJob={(job) => {
+          setSelectedJobId(job.id);
+          void supabase.auth.getUser().then(({ data }) => {
+            if (data.user) {
+              void supabase.from("analytics_events").insert({ user_id: data.user.id, event_name: "job_open" });
+            }
+          });
+        }}
         onViewportChange={setViewport}
         onVisibleCountChange={setVisibleCount}
         onHighlightVisibleReady={(highlight) => {
@@ -184,6 +289,26 @@ export default function JobTracker() {
         }}
         target={target}
       />
+
+      {showLocationPrompt && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
+          <section role="dialog" aria-modal="true" aria-labelledby="start-location-title" className="w-full max-w-md rounded-3xl border border-white/30 bg-white p-6 text-slate-900 shadow-2xl">
+            <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-600">St. Louis launch area</p>
+            <h1 id="start-location-title" className="mt-2 text-2xl font-semibold">Where should your flight start?</h1>
+            <p className="mt-2 text-sm leading-6 text-slate-600">Choose a city, school, company, address, or your current location. JobMap currently covers St. Louis City and County plus 50 miles.</p>
+            <form onSubmit={(event) => void submitStartingLocation(event)} className="mt-5">
+              <label htmlFor="start-location" className="sr-only">City or address</label>
+              <input id="start-location" autoFocus value={startLocation} onChange={(event) => setStartLocation(event.target.value)} placeholder="City, state or street address" className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-blue-500" />
+              <button disabled={locationPromptLoading} className="mt-3 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white disabled:opacity-50">{locationPromptLoading ? "Finding location…" : "Start here"}</button>
+            </form>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <button disabled={locationPromptLoading} onClick={startAtCurrentLocation} className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-medium disabled:opacity-50">Use my location</button>
+              <button disabled={locationPromptLoading} onClick={exploreStLouis} className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-medium disabled:opacity-50">Explore St. Louis</button>
+            </div>
+            {locationPromptError && <p role="alert" className="mt-3 text-sm text-rose-700">{locationPromptError}</p>}
+          </section>
+        </div>
+      )}
 
       <JobSidebar jobs={functionJobs} titleQuery={roleQuery} filters={filters} setFilters={setFilters} />
 

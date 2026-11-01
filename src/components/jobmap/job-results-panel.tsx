@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { BriefcaseBusiness, ChevronDown, ExternalLink, LoaderCircle, MapPin } from "lucide-react";
 import type { Job } from "@/types";
 import { getJobApplicationLink } from "@/lib/jobs";
+import { trackSignedInEvent } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 
 interface JobResultsPanelProps {
@@ -121,7 +122,10 @@ export default function JobResultsPanel({
                 href={getJobApplicationLink(job)}
                 target="_blank"
                 rel="noopener noreferrer"
-                onClick={() => onHighlight(null)}
+                onClick={() => {
+                  onHighlight(null);
+                  void trackSignedInEvent("job_apply_click");
+                }}
                 className={cn(
                   "inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-blue-700 transition hover:bg-blue-50",
                 )}
@@ -133,7 +137,7 @@ export default function JobResultsPanel({
         ))}
       </ul>
       <div className="border-t border-slate-200/80 px-3 py-2 text-center text-[10px] text-slate-400">
-        Select a card to fly to its map location
+        Verified sites fly into view; approximate listings stay unpinned.
       </div>
     </section>
   );

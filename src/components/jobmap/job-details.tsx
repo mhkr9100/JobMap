@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { CompanyMark, WorkTypeBadge } from "@/components/jobmap/job-card";
 import type { Job } from "@/types";
 import { getJobApplicationLink } from "@/lib/jobs";
+import { trackSignedInEvent } from "@/lib/analytics";
 
 export interface JobDetailsProps {
   job: Job | null;
@@ -79,6 +80,7 @@ export function JobDetails({ job, onClose }: JobDetailsProps) {
             href={applicationLink}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={() => void trackSignedInEvent("job_apply_click")}
           >
             Apply Now
             <ExternalLink aria-hidden="true" className="size-3.5" />

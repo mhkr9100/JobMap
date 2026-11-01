@@ -13,11 +13,11 @@ Features:
 """
 
 import hashlib
+import math
 import os
 import re
 import unicodedata
 from collections.abc import Mapping
-from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.parse import quote
@@ -55,23 +55,9 @@ SEARCH_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("Data", "data analyst data engineer"),
 )
 
-# Top US Metros rotated on hourly cron jobs
-US_METROS: tuple[str, ...] = (
-    "St. Louis, MO",
-    "New York, NY",
-    "San Francisco, CA",
-    "Chicago, IL",
-    "Miami, FL",
-    "Austin, TX",
-    "Seattle, WA",
-    "Denver, CO",
-    "Atlanta, GA",
-    "Dallas, TX",
-    "Boston, MA",
-    "Los Angeles, CA",
-    "Phoenix, AZ",
-    "Washington, DC",
-)
+LAUNCH_LOCATION = "St. Louis, MO"
+LAUNCH_CENTER = (-90.1994, 38.627)
+LAUNCH_RADIUS_METERS = 80_467.2  # 50 miles from downtown St. Louis
 
 SITES = ("indeed", "linkedin", "glassdoor")
 RESULTS_PER_SITE = 10
@@ -81,6 +67,12 @@ GEOCODE_CACHE: dict[str, list[float] | None] = {}
 _SALARY_NUMBER_PATTERN = re.compile(
     r"(?<![\w.])(?P<amount>\d[\d,]*(?:\.\d+)?|\.\d+)\s*(?P<unit>[kKmM])?(?![A-Za-z])"
 )
+_POINT_PATTERN = re.compile(r"POINT\(\s*([-+]?\d+(?:\.\d+)?)\s+([-+]?\d+(?:\.\d+)?)\s*\)", re.IGNORECASE)
+_STREET_SUFFIXES = {
+    "street", "st", "road", "rd", "avenue", "ave", "boulevard", "blvd",
+    "drive", "dr", "lane", "ln", "court", "ct", "highway", "hwy",
+    "parkway", "pkwy", "place", "pl", "terrace", "ter", "way",
+}
 
 
 def _load_local_env() -> None:
@@ -154,11 +146,134 @@ def _normalized_text(value: object) -> str:
 def generate_job_hash(job_data: Mapping[str, object]) -> str:
     """Return a stable SHA-256 ID from company, title, and normalized location."""
     location = job_data.get("location_label") or job_data.get("location") or ""
-    identity = "|".join(
-        _normalized_text(job_data.get(field, ""))
-        for field in ("company", "title")
-    ) + "|" + _normalized_text(location)
+    normalized_location = _normalized_text(location)
+    normalized_location = re.sub(r"\bsaint\b", "st", normalized_location)
+    normalized_location = re.sub(r"\b(united states|usa)\b", "", normalized_location)
+    normalized_location = " ".join(normalized_location.split())
+    identity = "|".join(_normalized_text(job_data.get(field, "")) for field in ("company", "title"))
+    identity += "|" + normalized_location
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _within_launch_radius(coords: list[float]) -> bool:
+    """Keep the launch harvest local, even when job boards return broad metros."""
+    lng, lat = coords
+    if not (math.isfinite(lng) and math.isfinite(lat) and -180 <= lng <= 180 and -90 <= lat <= 90):
+        return False
+    center_lng, center_lat = LAUNCH_CENTER
+    radians = math.radians
+    d_lat = radians(lat - center_lat)
+    d_lng = radians(lng - center_lng)
+    a = math.sin(d_lat / 2) ** 2 + math.cos(radians(center_lat)) * math.cos(radians(lat)) * math.sin(d_lng / 2) ** 2
+    a = min(1.0, max(0.0, a))
+    distance = 6_371_008.8 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return distance <= LAUNCH_RADIUS_METERS
+
+
+def _site_coordinates(value: object) -> list[float] | None:
+    if isinstance(value, str):
+        match = _POINT_PATTERN.search(value)
+        if match:
+            return [float(match.group(1)), float(match.group(2))]
+    if isinstance(value, Mapping):
+        coordinates = value.get("coordinates")
+        if isinstance(coordinates, (list, tuple)) and len(coordinates) >= 2:
+            try:
+                return [float(coordinates[0]), float(coordinates[1])]
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _street_fingerprint(value: object) -> tuple[str, tuple[str, ...]] | None:
+    words = _normalized_text(value).split()
+    for index, word in enumerate(words):
+        if not word.isdigit():
+            continue
+        street = [
+            token
+            for token in words[index + 1 :]
+            if token not in _STREET_SUFFIXES and token not in {"north", "south", "east", "west", "n", "s", "e", "w", "unit", "suite", "floor"}
+        ][:2]
+        return (word, tuple(street)) if street else None
+    return None
+
+
+def _load_sites_for_organizations(
+    client: Client, organization_ids: list[str]
+) -> dict[str, list[dict[str, object]]]:
+    sites_by_organization: dict[str, list[dict[str, object]]] = {}
+    for id_offset in range(0, len(organization_ids), 100):
+        batch_ids = organization_ids[id_offset : id_offset + 100]
+        offset = 0
+        while True:
+            response = (
+                client.table("organization_sites")
+                .select("id,organization_id,address,location,location_precision,confidence")
+                .in_("organization_id", batch_ids)
+                .range(offset, offset + 499)
+                .execute()
+            )
+            rows = response.data or []
+            for site in rows:
+                organization_id = str(site["organization_id"])
+                sites_by_organization.setdefault(organization_id, []).append(site)
+            if len(rows) < 500:
+                break
+            offset += 500
+    return sites_by_organization
+
+
+def _verified_site_match(
+    location_label: str, sites: list[dict[str, object]]
+) -> dict[str, object] | None:
+    source_address = _normalized_text(location_label)
+    source_fingerprint = _street_fingerprint(location_label)
+    candidates: list[dict[str, object]] = []
+    for site in sites:
+        if site.get("location_precision") not in {"building", "address"}:
+            continue
+        try:
+            confidence = float(site.get("confidence", 0))
+        except (TypeError, ValueError):
+            continue
+        if confidence < 0.85:
+            continue
+        address = str(site.get("address") or "")
+        normalized_address = _normalized_text(address)
+        exact = bool(normalized_address and normalized_address in source_address)
+        same_street = _street_fingerprint(address) == source_fingerprint
+        # A city-only job listing can use the single known local employer site.
+        # If the employer has multiple eligible sites, only an address-level
+        # match is specific enough to choose one.
+        if exact or (source_fingerprint is not None and same_street):
+            candidate = dict(site)
+            candidate["match_exact"] = exact
+            candidates.append(candidate)
+
+    if not source_fingerprint and len(candidates) == 0:
+        eligible = [
+            site
+            for site in sites
+            if site.get("location_precision") in {"building", "address"}
+            and float(site.get("confidence", 0)) >= 0.85
+            and _site_coordinates(site.get("location"))
+            and _within_launch_radius(_site_coordinates(site.get("location")) or [])
+        ]
+        # Duplicate records for the same physical address count as one site.
+        unique_addresses = {_normalized_text(site.get("address")) for site in eligible}
+        if len(unique_addresses) == 1 and eligible:
+            return eligible[0]
+
+    # Distinct source records at the same address are one physical site.
+    unique_candidates: dict[str, dict[str, object]] = {}
+    for site in candidates:
+        key = _normalized_text(site.get("address"))
+        current = unique_candidates.get(key)
+        if current is None or float(site.get("confidence", 0)) > float(current.get("confidence", 0)):
+            unique_candidates[key] = site
+    # If the company has multiple indistinguishable sites, never guess.
+    return next(iter(unique_candidates.values())) if len(unique_candidates) == 1 else None
 
 
 def _hash_as_uuid(job_hash: str) -> str:
@@ -305,63 +420,9 @@ def _h1b_sponsorship(description: str) -> bool | None:
     return None
 
 
-def harvest_free_apis(default_location: str = "St. Louis, MO") -> list[dict[str, object]]:
-    """Harvest free job APIs (Remotive, Arbeitnow) to supplement scrape volume."""
-    records: list[dict[str, object]] = []
-
-    # 1. Remotive Free API
-    try:
-        res = requests.get("https://remotive.com/api/remote-jobs?limit=50", timeout=12)
-        if res.ok:
-            jobs_data = res.json().get("jobs", [])
-            for item in jobs_data:
-                title = _as_text(item.get("title"))
-                company = _as_text(item.get("company_name"))
-                if not title or not company:
-                    continue
-                location_label = _as_text(item.get("candidate_required_location")) or "USA"
-                coords = geocode_address(location_label) or geocode_address(default_location)
-                if not coords:
-                    continue
-
-                salary_str = _as_text(item.get("salary"))
-                s_min, s_max = normalize_salary(salary_str)
-                desc = _as_text(item.get("description"))
-                h = generate_job_hash({"company": company, "title": title, "location_label": location_label})
-
-                records.append({
-                    "id": _hash_as_uuid(h),
-                    "dedupe_hash": h,
-                    "title": title,
-                    "company": company,
-                    "location_label": location_label,
-                    "location": {"type": "Point", "coordinates": coords},
-                    "coords": coords,
-                    "salary": salary_str or "Competitive",
-                    "salary_min": s_min,
-                    "salary_max": s_max,
-                    "worktype": "Remote",
-                    "status": "Available",
-                    "description": desc,
-                    "application_url": _as_text(item.get("url")),
-                    "industry": _as_text(item.get("category"), "Software"),
-                    "job_function": _as_text(item.get("category"), "Engineering"),
-                    "experience_level": _experience_level(desc),
-                    "job_type": _job_type(item.get("job_type")) or "Full-time",
-                    "h1b_sponsorship": _h1b_sponsorship(desc),
-                })
-    except Exception as error:
-        print(f"Remotive free API harvest notice: {error}")
-
-    return records
-
-
 def harvest_and_upload(location: str | None = None) -> int:
-    """Harvest across configured categories and upsert deduplicated jobs."""
-    if not location:
-        # Rotate through US metros based on the current hour
-        current_hour = datetime.utcnow().hour
-        location = US_METROS[current_hour % len(US_METROS)]
+    """Harvest local, non-remote jobs and retain a separate employer registry."""
+    location = location or LAUNCH_LOCATION
 
     print(f"=== Starting Harvest for Metro: {location} ===")
     client = _get_supabase()
@@ -369,13 +430,8 @@ def harvest_and_upload(location: str | None = None) -> int:
     category_failures: list[str] = []
     category_results = 0
 
-    # 1. Harvest free APIs
-    free_api_jobs = harvest_free_apis(default_location=location)
-    for job in free_api_jobs:
-        records_by_hash[job["dedupe_hash"]] = job
-    print(f"Harvested {len(free_api_jobs)} listings from free APIs.")
-
-    # 2. Harvest JobSpy across all categories
+    # Search all configured categories from local job-board results only. Remote
+    # roles are excluded, and geocoded points are clipped to the launch radius.
     for industry, search_term in SEARCH_CATEGORIES:
         print(f"Scraping {industry} in {location}...")
         try:
@@ -404,10 +460,11 @@ def harvest_and_upload(location: str | None = None) -> int:
                 continue
 
             work_type = _work_type(row, description)
+            if work_type == "Remote":
+                continue
             location_label = source_location or location
-            geocode_label = location if work_type == "Remote" else location_label
-            coords = geocode_address(geocode_label)
-            if coords is None:
+            coords = geocode_address(location_label)
+            if coords is None or not _within_launch_radius(coords):
                 continue
 
             salary_text = _as_text(row.get("salary"))
@@ -424,8 +481,10 @@ def harvest_and_upload(location: str | None = None) -> int:
                 "title": title,
                 "company": company,
                 "location_label": location_label,
+                "source_location": location_label,
                 "location": {"type": "Point", "coordinates": coords},
                 "coords": coords,
+                "location_precision": "approximate",
                 "salary": salary_text or "Not Listed",
                 "salary_min": salary_min,
                 "salary_max": salary_max,
@@ -456,6 +515,57 @@ def harvest_and_upload(location: str | None = None) -> int:
 
     uploaded = 0
     failed_batches = 0
+    # The employer registry is long-lived. Job rows can expire independently;
+    # company entities survive each harvest and can later be joined to verified
+    # building/site records imported from local GIS and OpenStreetMap sources.
+    organization_names = sorted({str(row["company"]) for row in records})
+    organizations = [
+        {
+            "canonical_name": name,
+            "normalized_name": _normalized_text(name),
+            "source": "job_harvest",
+        }
+        for name in organization_names
+        if _normalized_text(name)
+    ]
+    organization_ids: dict[str, str] = {}
+    for start in range(0, len(organizations), UPLOAD_BATCH_SIZE):
+        org_batch = organizations[start : start + UPLOAD_BATCH_SIZE]
+        client.table("organizations").upsert(org_batch, on_conflict="normalized_name").execute()
+        normalized_names = [org["normalized_name"] for org in org_batch]
+        org_rows = (
+            client.table("organizations")
+            .select("id,normalized_name")
+            .in_("normalized_name", normalized_names)
+            .execute()
+            .data
+        ) or []
+        organization_ids.update({row["normalized_name"]: str(row["id"]) for row in org_rows})
+
+    for job in records:
+        normalized_company = _normalized_text(job["company"])
+        if organization_id := organization_ids.get(normalized_company):
+            job["organization_id"] = organization_id
+    sites_by_organization = _load_sites_for_organizations(client, list(organization_ids.values()))
+    for job in records:
+        organization_id = job.get("organization_id")
+        if not isinstance(organization_id, str):
+            continue
+        site = _verified_site_match(
+            str(job.get("source_location") or job.get("location_label") or ""),
+            sites_by_organization.get(organization_id, []),
+        )
+        if not site:
+            continue
+        coords = _site_coordinates(site.get("location"))
+        if not coords or not _within_launch_radius(coords):
+            continue
+        job["site_id"] = str(site["id"])
+        job["location"] = {"type": "Point", "coordinates": coords}
+        job["coords"] = coords
+        job["location_label"] = str(site.get("address") or job["location_label"])
+        job["location_precision"] = str(site["location_precision"])
+
     for start in range(0, len(records), UPLOAD_BATCH_SIZE):
         batch = records[start : start + UPLOAD_BATCH_SIZE]
         try:

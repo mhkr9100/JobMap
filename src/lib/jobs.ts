@@ -105,6 +105,8 @@ export function mapSupabaseJob(row: Record<string, unknown>, index: number): Job
   const workTypeRaw = String(row.workType ?? row.worktype ?? row.work_type ?? "");
   const workType =
     workTypeRaw === "Remote" || workTypeRaw === "On-site" ? workTypeRaw : "Hybrid";
+  // The St. Louis launch intentionally excludes remote-only roles.
+  if (workTypeRaw === "Remote") return null;
   const text = (value: unknown) => (typeof value === "string" && value ? value : undefined);
 
   return {
@@ -116,6 +118,13 @@ export function mapSupabaseJob(row: Record<string, unknown>, index: number): Job
     status: normalizeJobStatus(row.status),
     salary: row.salary && row.salary !== "Not Listed" ? String(row.salary) : "",
     workType,
+    locationPrecision:
+      row.location_precision === "building" || row.location_precision === "address"
+        ? row.location_precision
+        : "approximate",
+    organizationId: text(row.organization_id),
+    siteId: text(row.site_id),
+    logoUrl: text(row.logo_url),
     description: text(row.description),
     initials: company.slice(0, 1).toUpperCase(),
     application_url: text(row.application_url),

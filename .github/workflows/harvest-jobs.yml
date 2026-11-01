@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Target Metro (leave empty for automatic US hourly rotation)"
+        description: "Optional target within 50 miles of downtown St. Louis"
         required: false
         default: ""
 
