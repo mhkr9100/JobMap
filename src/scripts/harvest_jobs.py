@@ -263,7 +263,7 @@ def _verified_site_match(
     source_fingerprint = _street_fingerprint(location_label)
     candidates: list[dict[str, object]] = []
     for site in sites:
-        if site.get("location_precision") not in {"building", "address"}:
+        if site.get("location_precision") not in {"building", "address", "site"}:
             continue
         try:
             confidence = float(site.get("confidence", 0))
@@ -287,7 +287,7 @@ def _verified_site_match(
         eligible = [
             site
             for site in sites
-            if site.get("location_precision") in {"building", "address"}
+            if site.get("location_precision") in {"building", "address", "site"}
             and float(site.get("confidence", 0)) >= 0.85
             and _site_coordinates(site.get("location"))
             and _within_launch_radius(_site_coordinates(site.get("location")) or [])
@@ -406,14 +406,16 @@ def _salary_bounds(row: pd.Series, salary_text: str) -> tuple[int | None, int | 
 
 
 def _work_type(row: pd.Series, description: str) -> str:
+    text = " ".join((description, _as_text(row.get("location")))).casefold()
+    # A hybrid schedule is a local worksite, even when the posting mentions
+    # occasional remote days. Remote-only roles are discarded at harvest time.
+    if re.search(r"\bhybrid\b", text):
+        return "Hybrid"
     remote_flag = _as_text(row.get("is_remote")).casefold()
     if remote_flag in {"true", "yes", "1"}:
         return "Remote"
-    text = description.casefold()
-    if "remote" in text:
+    if re.search(r"\b(remote|work from home|telecommut(?:e|ing))\b", text):
         return "Remote"
-    if "hybrid" in text:
-        return "Hybrid"
     return "On-site"
 
 

@@ -12,16 +12,37 @@ mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ?? "";
 
 const DEFAULT_PITCH = 60;
 const MAX_PITCH = 85;
-const MIN_FLIGHT_ZOOM = 11.8;
+// Mapbox Standard's 3D building layer is most dependable at neighborhood zoom.
+// Keeping the camera above this floor avoids the flat-map views from the launch.
+const MIN_FLIGHT_ZOOM = 15.1;
 const MAX_FLIGHT_ZOOM = 18;
 const ST_LOUIS_CENTER: [number, number] = [-90.1994, 38.627];
-// A 50-mile circle is enforced in SQL. The rectangular map bound prevents
-// flying far outside that launch region while keeping camera movement cheap.
+const LAUNCH_RADIUS_METERS = 80_467.2;
+// This coarse box keeps Mapbox from wrapping or allowing unbounded panning;
+// the circular radius is enforced precisely after each camera movement.
 const ST_LOUIS_FLIGHT_BOUNDS: [[number, number], [number, number]] = [
   [-91.14, 37.904],
   [-89.26, 39.35],
 ];
 const EMPTY_POLYGONS: FeatureCollection<Polygon> = { type: "FeatureCollection", features: [] };
+
+function clampToLaunchRadius([lng, lat]: [number, number]): [number, number] {
+  const [centerLng, centerLat] = ST_LOUIS_CENTER;
+  const radians = Math.PI / 180;
+  const deltaLat = (lat - centerLat) * radians;
+  const deltaLng = (lng - centerLng) * radians;
+  const centerLatRadians = centerLat * radians;
+  const haversine =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(centerLatRadians) * Math.cos(lat * radians) * Math.sin(deltaLng / 2) ** 2;
+  const distance = 6_371_008.8 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+  const safeRadius = LAUNCH_RADIUS_METERS - 10;
+
+  if (distance <= safeRadius) return [lng, lat];
+
+  const ratio = safeRadius / distance;
+  return [centerLng + (lng - centerLng) * ratio, centerLat + (lat - centerLat) * ratio];
+}
 
 interface MapViewProps {
   jobs: Job[];
@@ -43,7 +64,7 @@ interface CompanyPlace {
   building: string;
   logo: string | null;
   jobs: Job[];
-  precision: "building" | "address" | "approximate";
+  precision: "building" | "address" | "site" | "approximate";
 }
 
 interface PlaceProps {
@@ -571,9 +592,9 @@ export default function MapView({
     if (!m) return;
     setFlightView(view);
     const camera = {
-      cockpit: { pitch: 42, zoom: 15.4 },
-      "chase-close": { pitch: 62, zoom: 14.2 },
-      "chase-far": { pitch: 66, zoom: 12.6 },
+      cockpit: { pitch: 42, zoom: 16.2 },
+      "chase-close": { pitch: 62, zoom: 15.6 },
+      "chase-far": { pitch: 66, zoom: 15.1 },
     }[view];
     m.easeTo({ ...camera, duration: 650, essential: true });
   }, []);
@@ -586,7 +607,7 @@ export default function MapView({
       container: mapContainer.current,
       style: "mapbox://styles/mapbox/standard",
       center: ST_LOUIS_CENTER,
-      zoom: 14,
+      zoom: 15.4,
       pitch: DEFAULT_PITCH,
       bearing: -20,
       maxPitch: MAX_PITCH,
@@ -641,7 +662,7 @@ export default function MapView({
         type: "geojson",
         data: placesToGeoJSON(placesRef.current),
         cluster: true,
-        clusterMaxZoom: 14,
+        clusterMaxZoom: 16,
         clusterRadius: 60,
         // Cluster labels show the real number of JOBS, not the number of points.
         clusterProperties: { jobs: ["+", ["get", "count"]] },
@@ -661,6 +682,13 @@ export default function MapView({
 
       let viewportTimer: number | undefined;
       const reportViewport = () => {
+        const [lng, lat] = clampToLaunchRadius([instance.getCenter().lng, instance.getCenter().lat]);
+        const center = instance.getCenter();
+        if (Math.abs(center.lng - lng) > 1e-5 || Math.abs(center.lat - lat) > 1e-5) {
+          window.clearTimeout(viewportTimer);
+          instance.easeTo({ center: [lng, lat], duration: 250, essential: true });
+          return;
+        }
         window.clearTimeout(viewportTimer);
         viewportTimer = window.setTimeout(() => {
           const bounds = instance.getBounds();
@@ -755,7 +783,9 @@ export default function MapView({
 
   // ---- Data updates ----
   useEffect(() => {
-    placesRef.current = buildPlaces(jobs.filter((job) => job.locationPrecision !== "approximate"));
+    placesRef.current = buildPlaces(
+      jobs.filter((job) => job.locationPrecision === "building" || job.locationPrecision === "site"),
+    );
     const m = map.current;
     const source = m?.getSource("jobs") as mapboxgl.GeoJSONSource | undefined;
     source?.setData(placesToGeoJSON(placesRef.current));
@@ -825,10 +855,10 @@ export default function MapView({
     <div className="relative h-full w-full overflow-hidden bg-slate-900">
       <div ref={mapContainer} className="h-full w-full" />
 
-      {jobs.some((job) => job.locationPrecision === "approximate") && (
+      {jobs.some((job) => job.locationPrecision !== "building" && job.locationPrecision !== "site") && (
           <div className="pointer-events-none absolute left-1/2 top-24 z-10 -translate-x-1/2 rounded-2xl border border-white/50 bg-white/90 px-4 py-3 text-center shadow-xl backdrop-blur-lg">
-            <p className="text-sm font-semibold text-slate-800">{jobs.filter((job) => job.locationPrecision === "approximate").length.toLocaleString()} local jobs need a verified employer site</p>
-            <p className="mt-1 text-xs text-slate-500">Approximate job-board locations are kept in the results list, not shown as building pins.</p>
+            <p className="text-sm font-semibold text-slate-800">{jobs.filter((job) => job.locationPrecision !== "building" && job.locationPrecision !== "site").length.toLocaleString()} jobs need a building-verified employer site</p>
+            <p className="mt-1 text-xs text-slate-500">Street-address and job-board points stay in the results list until matched to a building or mapped employer site.</p>
           </div>
         )}
 
@@ -847,6 +877,11 @@ export default function MapView({
           <div className="rounded-full border border-white/35 bg-slate-950/55 px-4 py-1.5 font-mono text-[10px] tracking-[0.18em] text-white shadow-lg backdrop-blur-sm">FLIGHT VIEW · ST. LOUIS</div>
         </div>
       )}
+
+      <p className="pointer-events-auto absolute right-3 top-3 z-[4] max-w-[min(34rem,calc(100%-1.5rem))] rounded-lg bg-white/80 px-2.5 py-1.5 text-[10px] text-slate-600 shadow-sm backdrop-blur-sm">
+        Employer sites: <a className="underline" href="https://www.stlouis-mo.gov/data/" target="_blank" rel="noreferrer">St. Louis open data</a>
+        {" · "}<a className="underline" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors (ODbL)</a>
+      </p>
 
       {popup && (
         <div

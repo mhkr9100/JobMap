@@ -15,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from supabase import Client, create_client
 
@@ -89,6 +90,12 @@ def _value(properties: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _favicon_url(website: str) -> str | None:
+    parsed = urlparse(website if "://" in website else f"https://{website}")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    return f"https://icons.duckduckgo.com/ip3/{host}.ico" if "." in host else None
+
+
 def _address(properties: dict[str, Any]) -> str:
     full = _value(properties, "addr:full", "address", "full_address")
     if full:
@@ -107,9 +114,15 @@ def _precision(properties: dict[str, Any], geometry: dict[str, Any]) -> tuple[st
         _value(properties, "addr:full", "address", "full_address")
         or (_value(properties, "addr:housenumber", "housenumber", "house_number") and _value(properties, "addr:street", "street"))
     )
+    business_poi = properties.get("site_evidence") == "osm_business_poi"
+    city_building_match = properties.get("site_evidence") == "city_license_building_match"
     has_building = bool(properties.get("building")) and geometry.get("type") in {"Polygon", "MultiPolygon"}
-    if has_building and address_known:
-        return "building", 0.95
+    if city_building_match:
+        return "building", 0.96
+    if has_building and business_poi:
+        return "building", 0.92 if address_known else 0.88
+    if business_poi:
+        return "site", 0.86 if address_known or properties.get("website") else 0.82
     if address_known:
         return "address", 0.88
     return "approximate", 0.55
@@ -137,7 +150,7 @@ def import_geojson(path: Path, source: str) -> tuple[int, int]:
             "name": name,
             "normalized_name": _normalized_text(name),
             "website": _value(properties, "website", "contact:website", "url") or None,
-            "logo_url": _value(properties, "logo_url", "logo") or None,
+            "logo_url": _value(properties, "logo_url", "logo") or _favicon_url(_value(properties, "website", "contact:website")) ,
             "address": address or None,
             "city": _value(properties, "addr:city", "city", "addr:suburb", "suburb") or "St. Louis",
             "region": _value(properties, "addr:state", "state", "region") or "MO",
@@ -146,22 +159,35 @@ def import_geojson(path: Path, source: str) -> tuple[int, int]:
             "precision": precision,
             "confidence": confidence,
             "source_id": source_id,
+            "source": _value(properties, "source") or source,
+            "building_source_id": _value(properties, "building_source_id") or None,
         })
 
     client = _client()
     orgs = [
-        {"canonical_name": item["name"], "normalized_name": item["normalized_name"], "website": item["website"], "logo_url": item["logo_url"], "source": source}
+        {"canonical_name": item["name"], "normalized_name": item["normalized_name"], "source": item["source"]}
         for item in candidates
     ]
     by_name = {org["normalized_name"]: org for org in orgs}
     organizations = list(by_name.values())
-    for start in range(0, len(organizations), UPLOAD_BATCH_SIZE):
+    existing_orgs: dict[str, dict[str, Any]] = {}
+    names = [org["normalized_name"] for org in organizations]
+    for start in range(0, len(names), UPLOAD_BATCH_SIZE):
+        rows = (
+            client.table("organizations")
+            .select("id,normalized_name,website,logo_url")
+            .in_("normalized_name", names[start : start + UPLOAD_BATCH_SIZE])
+            .execute()
+            .data
+        ) or []
+        existing_orgs.update({row["normalized_name"]: row for row in rows})
+    new_organizations = [org for org in organizations if org["normalized_name"] not in existing_orgs]
+    for start in range(0, len(new_organizations), UPLOAD_BATCH_SIZE):
         client.table("organizations").upsert(
-            organizations[start : start + UPLOAD_BATCH_SIZE], on_conflict="normalized_name"
+            new_organizations[start : start + UPLOAD_BATCH_SIZE], on_conflict="normalized_name"
         ).execute()
 
     org_ids: dict[str, str] = {}
-    names = [org["normalized_name"] for org in organizations]
     for start in range(0, len(names), UPLOAD_BATCH_SIZE):
         rows = (
             client.table("organizations")
@@ -171,6 +197,28 @@ def import_geojson(path: Path, source: str) -> tuple[int, int]:
             .data
         ) or []
         org_ids.update({row["normalized_name"]: str(row["id"]) for row in rows})
+
+    # Keep the employer registry's best-known website and logo. Missing fields
+    # from a source never erase richer values already stored for that company.
+    metadata_by_name: dict[str, dict[str, str]] = {}
+    for item in candidates:
+        normalized = str(item["normalized_name"])
+        metadata: dict[str, str] = {}
+        if item["website"]:
+            metadata["website"] = str(item["website"])
+            metadata["logo_url"] = str(item["logo_url"] or "")
+        if metadata:
+            metadata_by_name.setdefault(normalized, metadata)
+    for normalized, metadata in metadata_by_name.items():
+        existing = existing_orgs.get(normalized, {})
+        updates: dict[str, str] = {}
+        if not existing.get("website") and metadata.get("website"):
+            updates["website"] = metadata["website"]
+        if not existing.get("logo_url") and metadata.get("logo_url"):
+            updates["logo_url"] = metadata["logo_url"]
+        organization_id = org_ids.get(normalized)
+        if updates and organization_id:
+            client.table("organizations").update(updates).eq("id", organization_id).execute()
 
     site_rows = []
     for item in candidates:
@@ -187,8 +235,9 @@ def import_geojson(path: Path, source: str) -> tuple[int, int]:
             "location": _postgis_point(item["coords"]),
             "location_precision": item["precision"],
             "confidence": item["confidence"],
-            "source": source,
+            "source": item["source"],
             "source_id": item["source_id"],
+            "building_source_id": item["building_source_id"],
         })
     uploaded = 0
     for start in range(0, len(site_rows), UPLOAD_BATCH_SIZE):

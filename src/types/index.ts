@@ -51,7 +51,7 @@ export interface Job {
   salary: string;
   workType: WorkType;
   /** Evidence quality for the mapped worksite; unknown postings stay approximate. */
-  locationPrecision?: "building" | "address" | "approximate";
+  locationPrecision?: "building" | "address" | "site" | "approximate";
   organizationId?: string;
   siteId?: string;
   logoUrl?: string;
