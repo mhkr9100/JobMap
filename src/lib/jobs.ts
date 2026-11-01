@@ -35,8 +35,55 @@ export function getJobApplicationLink(job: Job): string {
   )}`;
 }
 
+const KNOWN_COMPANY_DOMAINS: [RegExp, string][] = [
+  [/\bwashington university\b/i, "wustl.edu"],
+  [/\bbjc\b/i, "bjc.org"],
+  [/\bbarnes[-\s]*jewish\b/i, "barnesjewish.org"],
+  [/\bmercy\b/i, "mercy.net"],
+  [/\bssm health\b/i, "ssmhealth.com"],
+  [/\bsaint louis university\b|\bslu\b/i, "slu.edu"],
+  [/\bst\.?\s*luke'?s\b/i, "stlukes-stl.com"],
+  [/\bworld wide technology\b/i, "wwt.com"],
+  [/\bboeing\b/i, "boeing.com"],
+  [/\bmastercard\b/i, "mastercard.com"],
+  [/\bedward jones\b/i, "edwardjones.com"],
+  [/\bcentene\b/i, "centene.com"],
+  [/\bameren\b/i, "ameren.com"],
+  [/\benterprise mobility\b|\benterprise\b/i, "enterprise.com"],
+  [/\bstifel\b/i, "stifel.com"],
+  [/\bdeloitte\b/i, "deloitte.com"],
+  [/\bhusch blackwell\b/i, "huschblackwell.com"],
+  [/\bnorton rose fulbright\b/i, "nortonrosefulbright.com"],
+  [/\bgardaworld\b/i, "garda.com"],
+  [/\bsecuritas\b/i, "securitasinc.com"],
+  [/\ballied universal\b/i, "aus.com"],
+  [/\bmarriott\b/i, "marriott.com"],
+  [/\baldi\b/i, "aldi.us"],
+  [/\bhome depot\b/i, "homedepot.com"],
+  [/\bdollar general\b/i, "dollargeneral.com"],
+  [/\barchdiocese of st/i, "archstl.org"],
+  [/\bcity of st\.?\s*louis\b/i, "stlouis-mo.gov"],
+  [/\bcarshield\b/i, "carshield.com"],
+  [/\beaton\b/i, "eaton.com"],
+  [/\badp\b/i, "adp.com"],
+  [/\bt-mobile\b/i, "t-mobile.com"],
+  [/\bquest diagnostics\b/i, "questdiagnostics.com"],
+  [/\bgeodis\b/i, "geodis.com"],
+  [/\briver city casino\b/i, "rivercity.com"],
+  [/\bfriendship village\b/i, "friendshipvillagestl.com"],
+  [/\bmidas hospitality\b/i, "midashospitality.com"],
+  [/\bschnucks\b/i, "schnucks.com"],
+  [/\bpanera\b/i, "panerabread.com"],
+  [/\bquiktrip\b/i, "quiktrip.com"],
+  [/\bweg transformers\b/i, "weg.net"],
+  [/\bnidec\b/i, "nidec.com"],
+];
+
 /** Best-effort employer domain used for the logo on map pins. */
 export function guessCompanyDomain(company: string, applicationUrl?: string): string {
+  for (const [pattern, domain] of KNOWN_COMPANY_DOMAINS) {
+    if (pattern.test(company)) return domain;
+  }
   if (applicationUrl) {
     try {
       const host = new URL(applicationUrl).hostname.replace(/^www\./, "");
@@ -50,7 +97,9 @@ export function guessCompanyDomain(company: string, applicationUrl?: string): st
   }
   const slug = company
     .toLowerCase()
-    .replace(/\b(inc|llc|ltd|corp|corporation|co|company|group|the|of|and)\b/g, "")
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s*-\s*(mo|il|st\.?\s*louis|us|usa)\b.*$/i, "")
+    .replace(/\b(usa|u\.s\.a\.|u\.s\.|us|inc|llc|ltd|corp|corporation|co|company|group|holdings|services|brands|international|the|of|and)\b/g, "")
     .replace(/[^a-z0-9]/g, "");
   return slug ? `${slug}.com` : "";
 }

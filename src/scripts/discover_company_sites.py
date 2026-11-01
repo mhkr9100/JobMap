@@ -28,6 +28,7 @@ import requests
 
 from harvest_jobs import LAUNCH_CENTER, LAUNCH_RADIUS_METERS, _within_launch_radius
 from import_company_sites import import_geojson
+from resolve_employer_buildings import resolve_all_active_jobs
 
 CITY_LICENSE_LAYER = (
     "https://maps8.stlouis-mo.gov/arcgis/rest/services/SLDC/"
@@ -367,6 +368,7 @@ def discover_sites(
         document = Path(temporary) / "st-louis-sites.geojson"
         document.write_text(json.dumps({"type": "FeatureCollection", "features": features}), encoding="utf-8")
         organizations, sites = import_geojson(document, source="stl-city-license-2025+osm")
+    resolve_all_active_jobs()
     return city_count, sites, snapped_count
 
 

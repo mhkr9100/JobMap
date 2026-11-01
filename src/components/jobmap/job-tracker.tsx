@@ -206,12 +206,12 @@ export default function JobTracker() {
   }
 
   function exploreStLouis() {
-    // A small randomized start inside the central city keeps the first view at
-    // building scale without suggesting a fake employer worksite.
-    const angle = Math.random() * Math.PI * 2;
-    const radiusKm = Math.sqrt(Math.random()) * 3.5;
-    const lat = 38.627 + (Math.sin(angle) * radiusKm) / 111.32;
-    const lng = -90.1994 + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((38.627 * Math.PI) / 180));
+    // A small randomized start inside Downtown/Midtown St. Louis (west of the river)
+    // keeps the first view at building scale without landing in the river or Illinois.
+    const angle = Math.PI * (0.55 + Math.random() * 0.9);
+    const radiusKm = Math.sqrt(Math.random()) * 1.4;
+    const lat = 38.6285 + (Math.sin(angle) * radiusKm) / 111.32;
+    const lng = Math.min(-90.191, -90.1994 + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((38.627 * Math.PI) / 180)));
     finishLocationStart([lng, lat], "St. Louis, MO");
   }
 

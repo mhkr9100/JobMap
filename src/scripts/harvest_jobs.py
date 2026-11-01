@@ -622,6 +622,13 @@ def harvest_and_upload(location: str | None = None) -> int:
     if uploaded == 0:
         raise RuntimeError("Harvest finished without any successful Supabase upserts.")
 
+    try:
+        from resolve_employer_buildings import resolve_all_active_jobs
+
+        resolve_all_active_jobs(client)
+    except Exception as resolve_error:
+        print(f"Active employer building resolution notice: {resolve_error}")
+
     print(f"Harvest complete: {uploaded} jobs upserted for {location}.")
     return uploaded
 

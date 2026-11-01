@@ -9,6 +9,9 @@ interface AdminMetrics {
   active_users_30d: number;
   events_30d: number;
   local_available_jobs: number;
+  total_organizations?: number;
+  verified_building_sites?: number;
+  building_pinned_jobs?: number;
 }
 
 interface AdminUser {
@@ -151,13 +154,16 @@ export default function AdminDashboard() {
           <>
             <p className="mb-5 text-sm text-slate-300">Usage metrics include signed-in activity only. The dashboard does not collect email addresses or precise user locations for analytics.</p>
             {metrics && (
-              <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {[
                   ["Registered users", metrics.total_users],
                   ["New · 30 days", metrics.new_users_30d],
                   ["Active · 30 days", metrics.active_users_30d],
                   ["Events · 30 days", metrics.events_30d],
                   ["Local available jobs", metrics.local_available_jobs],
+                  ["Building-pinned jobs", metrics.building_pinned_jobs ?? 0],
+                  ["Organizations in DB", metrics.total_organizations ?? 0],
+                  ["Verified building sites", metrics.verified_building_sites ?? 0],
                 ].map(([label, value]) => (
                   <article key={label} className="rounded-2xl border border-white/10 bg-white/5 p-4">
                     <p className="text-xs text-slate-400">{label}</p>

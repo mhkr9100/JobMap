@@ -38,6 +38,7 @@ interface MapControlsProps {
   onResetNorth: () => void;
   onToggle3D: () => void;
   onCameraViewChange: (view: FlightCameraView) => void;
+  cameraView: FlightCameraView;
   is3D: boolean;
   compassRef: RefObject<HTMLSpanElement | null>;
 }
@@ -103,6 +104,7 @@ export default function MapControls({
   onResetNorth,
   onToggle3D,
   onCameraViewChange,
+  cameraView,
   is3D,
   compassRef,
 }: MapControlsProps) {
@@ -212,7 +214,7 @@ export default function MapControls({
           <label className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-xl">
             Camera
             <select
-              defaultValue="chase-close"
+              value={cameraView}
               aria-label="Flight camera view"
               onChange={(event) => onCameraViewChange(event.target.value as FlightCameraView)}
               className="max-w-28 bg-transparent outline-none"

@@ -61,7 +61,7 @@ export async function GET(request: Request) {
   }
 
   const since = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  const [eventResult, jobsResult] = await Promise.all([
+  const [eventResult, jobsResult, orgsResult, sitesResult, pinnedJobsResult] = await Promise.all([
     context.admin.from("analytics_events").select("id", { count: "exact", head: true }).gte("created_at", new Date(since).toISOString()),
     context.admin.rpc("get_jobs_in_viewport", {
       min_lng: -91.2,
@@ -69,6 +69,9 @@ export async function GET(request: Request) {
       max_lng: -89.2,
       max_lat: 39.37,
     }, { count: "exact", head: true }),
+    context.admin.from("organizations").select("id", { count: "exact", head: true }),
+    context.admin.from("organization_sites").select("id", { count: "exact", head: true }).in("location_precision", ["building", "site", "address"]),
+    context.admin.from("jobs").select("id", { count: "exact", head: true }).not("site_id", "is", null),
   ]);
   if (eventResult.error || jobsResult.error) {
     return NextResponse.json({ error: "Could not load dashboard metrics." }, { status: 502 });
@@ -80,6 +83,9 @@ export async function GET(request: Request) {
       active_users_30d: allUsers.filter((user) => user.last_sign_in_at && Date.parse(user.last_sign_in_at) >= since).length,
       events_30d: eventResult.count ?? 0,
       local_available_jobs: jobsResult.count ?? 0,
+      total_organizations: orgsResult.count ?? 0,
+      verified_building_sites: sitesResult.count ?? 0,
+      building_pinned_jobs: pinnedJobsResult.count ?? 0,
     },
     users: firstPage.data.users.map((user) => ({
       id: user.id,

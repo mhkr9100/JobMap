@@ -5,6 +5,11 @@ on:
     # Refresh public business/site data monthly; the job harvest itself remains hourly.
     - cron: "0 6 1 * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Resolution mode: 'active-employers' (fast) or 'full-osm' (full regional refresh)"
+        required: false
+        default: "active-employers"
 
 permissions:
   contents: read
@@ -31,13 +36,24 @@ jobs:
       - name: Install site discovery dependencies
         run: python -m pip install -r src/scripts/requirements-sites.txt
 
+      - name: Resolve active job employers to verified buildings and logos
+        if: ${{ github.event.inputs.mode == 'active-employers' }}
+        run: python src/scripts/resolve_employer_buildings.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
+
       - name: Download current Missouri and Illinois map data
+        if: ${{ github.event.inputs.mode != 'active-employers' }}
         run: |
           mkdir -p "$RUNNER_TEMP/jobmap-osm"
           curl --fail --location --retry 3 --retry-delay 3 --output "$RUNNER_TEMP/jobmap-osm/missouri.osm.pbf" https://download.geofabrik.de/north-america/us/missouri-latest.osm.pbf
           curl --fail --location --retry 3 --retry-delay 3 --output "$RUNNER_TEMP/jobmap-osm/illinois.osm.pbf" https://download.geofabrik.de/north-america/us/illinois-latest.osm.pbf
 
       - name: Discover and import St. Louis employer sites
+        if: ${{ github.event.inputs.mode != 'active-employers' }}
         run: >-
           python src/scripts/discover_company_sites.py
           --missouri-pbf "$RUNNER_TEMP/jobmap-osm/missouri.osm.pbf"
@@ -46,6 +62,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
 
       - name: Clean up downloaded source files
         if: always()

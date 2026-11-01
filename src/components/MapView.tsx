@@ -482,20 +482,38 @@ export default function MapView({
     }
 
     const highlightedId = highlightedJobIdRef.current;
-    let highlightedCoords: [number, number] | null = null;
+    let highlightedPlace: CompanyPlace | null = null;
     if (highlightedId) {
       for (const place of placesRef.current.values()) {
         if (place.jobs.some((job) => job.id === highlightedId)) {
-          highlightedCoords = place.coords;
+          highlightedPlace = place;
           break;
         }
       }
     }
-    const highlightedPoint = highlightedCoords ? m.project(highlightedCoords) : null;
+    const highlightedPoint = highlightedPlace ? m.project(highlightedPlace.coords) : null;
+    let bestMarkerEl: HTMLElement | null = null;
+    let bestDistance = 54;
+    if (highlightedPlace) {
+      const directEntry =
+        markersRef.current.get(`place:${highlightedPlace.id}`) ??
+        markersRef.current.get(`stack:${highlightedPlace.building}`);
+      if (directEntry) {
+        bestMarkerEl = directEntry.marker.getElement();
+      } else if (highlightedPoint) {
+        for (const { marker } of markersRef.current.values()) {
+          const point = m.project(marker.getLngLat());
+          const distance = Math.hypot(point.x - highlightedPoint.x, point.y - highlightedPoint.y);
+          if (distance <= bestDistance) {
+            bestDistance = distance;
+            bestMarkerEl = marker.getElement();
+          }
+        }
+      }
+    }
     for (const { marker } of markersRef.current.values()) {
-      const point = m.project(marker.getLngLat());
-      const distance = highlightedPoint ? Math.hypot(point.x - highlightedPoint.x, point.y - highlightedPoint.y) : Infinity;
-      marker.getElement().classList.toggle("jm-hover-target", distance <= 90);
+      const elNode = marker.getElement();
+      elNode.classList.toggle("jm-hover-target", elNode === bestMarkerEl);
     }
   }, [openCompany]);
 
@@ -592,9 +610,9 @@ export default function MapView({
     if (!m) return;
     setFlightView(view);
     const camera = {
-      cockpit: { pitch: 42, zoom: 16.2 },
-      "chase-close": { pitch: 62, zoom: 15.6 },
-      "chase-far": { pitch: 66, zoom: 15.1 },
+      cockpit: { pitch: 72, zoom: 16.4 },
+      "chase-close": { pitch: 64, zoom: 15.7 },
+      "chase-far": { pitch: 58, zoom: 15.1 },
     }[view];
     m.easeTo({ ...camera, duration: 650, essential: true });
   }, []);
@@ -623,11 +641,11 @@ export default function MapView({
     map.current = instance;
 
     instance.on("style.load", () => {
-      // Buildings and what's in them — no street names, road shields or transit.
+      // Buildings and what's in them — no street names, road shields, third-party POI clutter, or transit.
       const config: [string, boolean][] = [
         ["showRoadLabels", false],
         ["showTransitLabels", false],
-        ["showPointOfInterestLabels", true],
+        ["showPointOfInterestLabels", false],
         ["showPlaceLabels", true],
         ["show3dObjects", true],
       ];
@@ -709,9 +727,6 @@ export default function MapView({
       if (compassRef.current) {
         compassRef.current.style.transform = `rotate(${-instance.getBearing()}deg)`;
       }
-      if (aircraftRef.current) {
-        aircraftRef.current.style.transform = `translate(-50%, -50%) rotate(${instance.getBearing()}deg)`;
-      }
     });
     instance.on("pitchend", () => setIs3D(instance.getPitch() > 10));
 
@@ -784,7 +799,7 @@ export default function MapView({
   // ---- Data updates ----
   useEffect(() => {
     placesRef.current = buildPlaces(
-      jobs.filter((job) => job.locationPrecision === "building" || job.locationPrecision === "site"),
+      jobs.filter((job) => job.locationPrecision !== "approximate"),
     );
     const m = map.current;
     const source = m?.getSource("jobs") as mapboxgl.GeoJSONSource | undefined;
@@ -855,26 +870,28 @@ export default function MapView({
     <div className="relative h-full w-full overflow-hidden bg-slate-900">
       <div ref={mapContainer} className="h-full w-full" />
 
-      {jobs.some((job) => job.locationPrecision !== "building" && job.locationPrecision !== "site") && (
+      {jobs.some((job) => job.locationPrecision === "approximate") && (
           <div className="pointer-events-none absolute left-1/2 top-24 z-10 -translate-x-1/2 rounded-2xl border border-white/50 bg-white/90 px-4 py-3 text-center shadow-xl backdrop-blur-lg">
-            <p className="text-sm font-semibold text-slate-800">{jobs.filter((job) => job.locationPrecision !== "building" && job.locationPrecision !== "site").length.toLocaleString()} jobs need a building-verified employer site</p>
-            <p className="mt-1 text-xs text-slate-500">Street-address and job-board points stay in the results list until matched to a building or mapped employer site.</p>
+            <p className="text-sm font-semibold text-slate-800">{jobs.filter((job) => job.locationPrecision === "approximate").length.toLocaleString()} jobs need a building-verified employer site</p>
+            <p className="mt-1 text-xs text-slate-500">City-level job-board points stay in the results list until matched to a verified employer building or site.</p>
           </div>
         )}
 
-      <div
-        className={`pointer-events-none absolute left-1/2 z-[5] flex -translate-x-1/2 items-center justify-center ${flightView === "cockpit" ? "bottom-[28%]" : "bottom-[21%]"}`}
-        aria-hidden="true"
-      >
-        <span
-          ref={aircraftRef}
-          className="text-3xl text-slate-900 drop-shadow-[0_2px_4px_rgba(255,255,255,0.95)]"
-          style={{ transform: "translate(-50%, -50%) rotate(-20deg)" }}
-        >✈</span>
-      </div>
+      {flightView !== "cockpit" && (
+        <div
+          className={`pointer-events-none absolute left-1/2 z-[5] flex -translate-x-1/2 items-center justify-center ${flightView === "chase-close" ? "bottom-[22%]" : "bottom-[18%]"}`}
+          aria-hidden="true"
+        >
+          <span
+            ref={aircraftRef}
+            className="text-3xl text-slate-900 drop-shadow-[0_2px_4px_rgba(255,255,255,0.95)]"
+            style={{ transform: "translate(-50%, -50%) rotate(-45deg)" }}
+          >✈</span>
+        </div>
+      )}
       {flightView === "cockpit" && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[4] flex h-24 items-end justify-center bg-gradient-to-t from-slate-950/45 to-transparent pb-3">
-          <div className="rounded-full border border-white/35 bg-slate-950/55 px-4 py-1.5 font-mono text-[10px] tracking-[0.18em] text-white shadow-lg backdrop-blur-sm">FLIGHT VIEW · ST. LOUIS</div>
+          <div className="rounded-full border border-white/35 bg-slate-950/55 px-4 py-1.5 font-mono text-[10px] tracking-[0.18em] text-white shadow-lg backdrop-blur-sm">COCKPIT HUD · ST. LOUIS</div>
         </div>
       )}
 
@@ -977,6 +994,7 @@ export default function MapView({
         onResetNorth={resetNorth}
         onToggle3D={toggle3D}
         onCameraViewChange={setFlightCameraView}
+        cameraView={flightView}
         is3D={is3D}
         compassRef={compassRef}
       />

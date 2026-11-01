@@ -122,6 +122,8 @@ async function suggestMapbox(
     session_token: session,
     limit: "8",
     language: "en",
+    country: "us",
+    bbox: "-91.14,37.904,-89.26,39.35",
     types: "region,postcode,district,place,locality,neighborhood,street,address,poi",
   });
   if (proximity) params.set("proximity", `${proximity[0]},${proximity[1]}`);
