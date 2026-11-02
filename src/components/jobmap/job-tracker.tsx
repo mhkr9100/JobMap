@@ -10,7 +10,7 @@ import LocationSearch from "@/components/LocationSearch";
 import { filterJobs, isActiveJob, mapSupabaseJob } from "@/lib/jobs";
 import { getCommuteArea, getCommuteBounds, isJobInCommuteArea } from "@/lib/commute";
 import { supabase } from "@/lib/supabase";
-import { geocodeAddress } from "@/lib/geocoder";
+import { geocodeStartingLocation } from "@/lib/geocoder";
 import type { CommutePreferences, Job, JobSearchFilters, JobViewport, MapTarget } from "@/types";
 import { INITIAL_JOB_FILTERS } from "@/types";
 
@@ -54,6 +54,7 @@ export default function JobTracker() {
   const [startLocation, setStartLocation] = useState("");
   const [locationPromptError, setLocationPromptError] = useState("");
   const [locationPromptLoading, setLocationPromptLoading] = useState(false);
+  const [locationNotice, setLocationNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const latestRequest = useRef(0);
   const highlightVisible = useRef<() => void>(() => undefined);
@@ -186,33 +187,46 @@ export default function JobTracker() {
     setCommuteOrigin({ coords: next.center, name });
   }
 
-  function finishLocationStart(coords: [number, number], name: string) {
-    const [lng, lat] = coords;
+  function randomStLouisCoords(): [number, number] {
+    const angle = Math.PI * (0.55 + Math.random() * 0.9);
+    const radiusKm = Math.sqrt(Math.random()) * 1.4;
+    const lat = 38.6285 + (Math.sin(angle) * radiusKm) / 111.32;
+    const lng = Math.min(
+      -90.191,
+      -90.1994 + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((38.627 * Math.PI) / 180)),
+    );
+    return [lng, lat];
+  }
+
+  function distanceFromStLouisMeters([lng, lat]: [number, number]): number {
     const centerLng = -90.1994;
     const centerLat = 38.627;
     const toRad = (degrees: number) => (degrees * Math.PI) / 180;
     const dLat = toRad(lat - centerLat);
     const dLng = toRad(lng - centerLng);
-    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(centerLat)) * Math.cos(toRad(lat)) * Math.sin(dLng / 2) ** 2;
-    const distanceMeters = 6_371_008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    if (distanceMeters > 80_467.2) {
-      setLocationPromptError("JobMap is launching in St. Louis and the surrounding 50 miles. Choose a location in that area.");
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(centerLat)) * Math.cos(toRad(lat)) * Math.sin(dLng / 2) ** 2;
+    return 6_371_008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function finishLocationStart(coords: [number, number], name: string, notice?: string) {
+    if (distanceFromStLouisMeters(coords) > 80_467.2) {
+      setLocationPromptError(
+        "JobMap is launching in St. Louis and the surrounding 50 miles. Choose a location in that area.",
+      );
       return;
     }
-    selectLocation({ center: coords, zoom: 15.2 }, name);
+    selectLocation({ center: coords, zoom: 15.6 }, name);
     window.localStorage.setItem("jobmap-location-start-v1", "done");
     setShowLocationPrompt(false);
     setLocationPromptError("");
-  }
-
-  function exploreStLouis() {
-    // A small randomized start inside Downtown/Midtown St. Louis (west of the river)
-    // keeps the first view at building scale without landing in the river or Illinois.
-    const angle = Math.PI * (0.55 + Math.random() * 0.9);
-    const radiusKm = Math.sqrt(Math.random()) * 1.4;
-    const lat = 38.6285 + (Math.sin(angle) * radiusKm) / 111.32;
-    const lng = Math.min(-90.191, -90.1994 + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((38.627 * Math.PI) / 180)));
-    finishLocationStart([lng, lat], "St. Louis, MO");
+    if (notice) {
+      setLocationNotice(notice);
+      window.setTimeout(() => setLocationNotice(null), 6500);
+    } else {
+      setLocationNotice(null);
+    }
   }
 
   async function submitStartingLocation(event: FormEvent<HTMLFormElement>) {
@@ -222,21 +236,28 @@ export default function JobTracker() {
     setLocationPromptLoading(true);
     setLocationPromptError("");
     try {
-      const coords = await geocodeAddress(query);
-      if (!coords) {
-        setLocationPromptError("I could not find that place. Try a city and state or a street address.");
+      const result = await geocodeStartingLocation(query);
+      if (!result) {
+        setLocationPromptError(
+          "Could not find that place in the 50-mile St. Louis region. Try a St. Louis city, school, company, or street address.",
+        );
+      } else if (result.isCityOnly) {
+        // City-only entries begin at a nearby randomized point inside that city.
+        const angle = Math.random() * Math.PI * 2;
+        const radiusKm = Math.sqrt(Math.random()) * 1.1;
+        const lat = result.coords[1] + (Math.sin(angle) * radiusKm) / 111.32;
+        const rawLng =
+          result.coords[0] +
+          (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((result.coords[1] * Math.PI) / 180));
+        // Keep Downtown St. Louis city-only starts west of the Mississippi River
+        const lng =
+          Math.abs(result.coords[0] - -90.1994) < 0.03 && Math.abs(result.coords[1] - 38.627) < 0.03
+            ? Math.min(-90.191, rawLng)
+            : rawLng;
+        finishLocationStart([lng, lat], result.label || query);
       } else {
-        // City-only entries begin at a nearby randomized point. A street
-        // address is kept exact; neither path changes a job's stored location.
-        const hasStreetNumber = /\b\d{1,6}\b/.test(query);
-        if (hasStreetNumber) finishLocationStart(coords, query);
-        else {
-          const angle = Math.random() * Math.PI * 2;
-          const radiusKm = Math.sqrt(Math.random()) * 1.2;
-          const lat = coords[1] + (Math.sin(angle) * radiusKm) / 111.32;
-          const lng = coords[0] + (Math.cos(angle) * radiusKm) / (111.32 * Math.cos((coords[1] * Math.PI) / 180));
-          finishLocationStart([lng, lat], query);
-        }
+        // Full address, school, campus, or company starts at exact coordinates.
+        finishLocationStart(result.coords, result.label || query);
       }
     } finally {
       setLocationPromptLoading(false);
@@ -244,21 +265,39 @@ export default function JobTracker() {
   }
 
   function startAtCurrentLocation() {
+    setLocationPromptError("");
     if (!navigator.geolocation) {
-      setLocationPromptError("This browser does not provide location access. Enter a city or address instead.");
+      finishLocationStart(
+        randomStLouisCoords(),
+        "St. Louis, MO",
+        "Browser GPS unavailable — starting flight in Downtown St. Louis.",
+      );
       return;
     }
     setLocationPromptLoading(true);
     navigator.geolocation.getCurrentPosition(
       ({ coords }) => {
-        finishLocationStart([coords.longitude, coords.latitude], "Your location");
+        const current: [number, number] = [coords.longitude, coords.latitude];
         setLocationPromptLoading(false);
+        if (distanceFromStLouisMeters(current) <= 80_467.2) {
+          finishLocationStart(current, "Your location");
+        } else {
+          finishLocationStart(
+            randomStLouisCoords(),
+            "St. Louis, MO",
+            "Your GPS is outside the 50-mile St. Louis launch zone — starting flight in St. Louis.",
+          );
+        }
       },
       () => {
-        setLocationPromptError("Location access was unavailable. Enter a city or address instead.");
         setLocationPromptLoading(false);
+        finishLocationStart(
+          randomStLouisCoords(),
+          "St. Louis, MO",
+          "Browser location permission wasn't granted — starting flight in Downtown St. Louis.",
+        );
       },
-      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+      { enableHighAccuracy: false, timeout: 7_000, maximumAge: 300_000 },
     );
   }
 
@@ -306,6 +345,8 @@ export default function JobTracker() {
         selectedJobId={selectedJobId}
         highlightedJobId={highlightedJobId}
         commuteArea={commuteArea}
+        flightStarted={!showLocationPrompt}
+        onChangeStartLocation={() => setShowLocationPrompt(true)}
         onSelectJob={(job) => {
           setSelectedJobId(job.id);
           void supabase.auth.getUser().then(({ data }) => {
@@ -325,20 +366,30 @@ export default function JobTracker() {
       {showLocationPrompt && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
           <section role="dialog" aria-modal="true" aria-labelledby="start-location-title" className="w-full max-w-md rounded-3xl border border-white/30 bg-white p-6 text-slate-900 shadow-2xl">
-            <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-600">St. Louis launch area</p>
+            <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-600">St. Louis Flight Simulator</p>
             <h1 id="start-location-title" className="mt-2 text-2xl font-semibold">Where should your flight start?</h1>
-            <p className="mt-2 text-sm leading-6 text-slate-600">Choose a city, school, company, address, or your current location. JobMap currently covers St. Louis City and County plus 50 miles.</p>
+            <p className="mt-2 text-sm leading-6 text-slate-600">Enter a city, school, company, or street address in the St. Louis 50-mile area, or start from your current location.</p>
             <form onSubmit={(event) => void submitStartingLocation(event)} className="mt-5">
               <label htmlFor="start-location" className="sr-only">City or address</label>
-              <input id="start-location" autoFocus value={startLocation} onChange={(event) => setStartLocation(event.target.value)} placeholder="City, state or street address" className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-blue-500" />
-              <button disabled={locationPromptLoading} className="mt-3 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white disabled:opacity-50">{locationPromptLoading ? "Finding location…" : "Start here"}</button>
+              <input id="start-location" autoFocus value={startLocation} onChange={(event) => setStartLocation(event.target.value)} placeholder="e.g., Clayton, MO, Washington University, or 100 N Broadway" className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-blue-500" />
+              <button disabled={locationPromptLoading} className="mt-3 w-full rounded-xl bg-blue-600 px-4 py-3 font-semibold text-white transition hover:bg-blue-700 disabled:opacity-50">{locationPromptLoading ? "Finding takeoff location…" : "Take off from here"}</button>
             </form>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <button disabled={locationPromptLoading} onClick={startAtCurrentLocation} className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-medium disabled:opacity-50">Use my location</button>
-              <button disabled={locationPromptLoading} onClick={exploreStLouis} className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-medium disabled:opacity-50">Explore St. Louis</button>
-            </div>
+            <button
+              type="button"
+              disabled={locationPromptLoading}
+              onClick={startAtCurrentLocation}
+              className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              Use my location
+            </button>
             {locationPromptError && <p role="alert" className="mt-3 text-sm text-rose-700">{locationPromptError}</p>}
           </section>
+        </div>
+      )}
+
+      {locationNotice && (
+        <div role="status" className="absolute top-16 left-1/2 z-40 -translate-x-1/2 rounded-full border border-sky-400/40 bg-slate-950/90 px-4 py-2 text-xs font-medium text-sky-100 shadow-2xl backdrop-blur-md">
+          {locationNotice}
         </div>
       )}
 
