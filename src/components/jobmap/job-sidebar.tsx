@@ -34,7 +34,7 @@ export default function JobSidebar({ jobs, titleQuery, filters, setFilters }: Jo
       <button
         type="button"
         onClick={() => setIsCollapsed(false)}
-        className="absolute left-4 top-24 z-20 flex size-12 items-center justify-center rounded-2xl border border-white/50 bg-white/95 text-slate-800 shadow-2xl backdrop-blur-2xl transition hover:bg-white md:left-6 md:top-6"
+        className="absolute left-4 top-20 z-30 flex size-12 items-center justify-center rounded-2xl border border-slate-200/80 bg-white text-slate-800 shadow-xl transition hover:bg-slate-50 md:left-6 md:top-24"
         aria-label="Open job filters"
       >
         <SlidersHorizontal className="size-4 text-blue-600" />
@@ -48,7 +48,7 @@ export default function JobSidebar({ jobs, titleQuery, filters, setFilters }: Jo
   }
 
   return (
-    <aside className="absolute left-4 top-24 z-20 flex max-h-[calc(100vh-9rem)] w-64 flex-col rounded-3xl border border-white/50 bg-white/90 p-4 text-slate-900 shadow-2xl backdrop-blur-2xl md:left-6 md:top-6 md:max-h-[calc(100vh-48px)] md:w-72 md:p-5">
+    <aside className="absolute left-4 top-20 z-30 flex max-h-[calc(100dvh-7rem)] w-64 flex-col rounded-3xl border border-slate-200/80 bg-white p-4 text-slate-900 shadow-2xl md:left-6 md:top-24 md:max-h-[calc(100dvh-8rem)] md:w-72 md:p-5">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-xl bg-blue-600 text-white shadow-md shadow-blue-500/30">

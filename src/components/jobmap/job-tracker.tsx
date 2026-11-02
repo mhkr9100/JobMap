@@ -4,10 +4,8 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Feature, Polygon } from "geojson";
 import MapView from "@/components/MapView";
 import JobSidebar from "@/components/jobmap/job-sidebar";
-import JobResultsPanel from "@/components/jobmap/job-results-panel";
-import AnalyticsDock from "@/components/AnalyticsDock";
 import LocationSearch from "@/components/LocationSearch";
-import { filterJobs, isActiveJob, mapSupabaseJob } from "@/lib/jobs";
+import { filterJobs, mapSupabaseJob } from "@/lib/jobs";
 import { getCommuteArea, getCommuteBounds, isJobInCommuteArea } from "@/lib/commute";
 import { supabase } from "@/lib/supabase";
 import { geocodeStartingLocation } from "@/lib/geocoder";
@@ -39,11 +37,9 @@ function areaKey(origin: CommuteOrigin | null, preferences: CommutePreferences):
 export default function JobTracker() {
   const [fetchedJobs, setFetchedJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [highlightedJobId, setHighlightedJobId] = useState<string | null>(null);
   const [roleQuery, setRoleQuery] = useState("");
   const [filters, setFilters] = useState<JobSearchFilters>(INITIAL_JOB_FILTERS);
   const [viewport, setViewport] = useState<JobViewport | null>(null);
-  const [visibleCount, setVisibleCount] = useState(0);
   const [target, setTarget] = useState<MapTarget | null>(null);
   const [commute, setCommute] = useState<CommutePreferences>(INITIAL_COMMUTE);
   const [commuteOrigin, setCommuteOrigin] = useState<CommuteOrigin | null>(null);
@@ -57,7 +53,6 @@ export default function JobTracker() {
   const [locationNotice, setLocationNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const latestRequest = useRef(0);
-  const highlightVisible = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     if (window.localStorage.getItem("jobmap-location-start-v1") !== "done") {
@@ -169,10 +164,6 @@ export default function JobTracker() {
     if (commute.enabled && !commuteArea) return [];
     return filterJobs(fetchedJobs, filters, roleQuery, commuteArea);
   }, [commute.enabled, commuteArea, fetchedJobs, filters, roleQuery]);
-  const activeJobs = useMemo(() => fetchedJobs.filter(isActiveJob), [fetchedJobs]);
-  const areaJobs = commuteArea
-    ? activeJobs.filter((job) => isJobInCommuteArea(job, commuteArea))
-    : activeJobs;
   const selectedJob = filteredJobs.find((job) => job.id === selectedJobId) ?? null;
   const functionJobs = commuteArea
     ? fetchedJobs.filter((job) => isJobInCommuteArea(job, commuteArea))
@@ -343,10 +334,8 @@ export default function JobTracker() {
       <MapView
         jobs={filteredJobs}
         selectedJobId={selectedJobId}
-        highlightedJobId={highlightedJobId}
         commuteArea={commuteArea}
         flightStarted={!showLocationPrompt}
-        onChangeStartLocation={() => setShowLocationPrompt(true)}
         onSelectJob={(job) => {
           setSelectedJobId(job.id);
           void supabase.auth.getUser().then(({ data }) => {
@@ -356,10 +345,6 @@ export default function JobTracker() {
           });
         }}
         onViewportChange={setViewport}
-        onVisibleCountChange={setVisibleCount}
-        onHighlightVisibleReady={(highlight) => {
-          highlightVisible.current = highlight;
-        }}
         target={target}
       />
 
@@ -388,7 +373,7 @@ export default function JobTracker() {
       )}
 
       {locationNotice && (
-        <div role="status" className="absolute top-16 left-1/2 z-40 -translate-x-1/2 rounded-full border border-sky-400/40 bg-slate-950/90 px-4 py-2 text-xs font-medium text-sky-100 shadow-2xl backdrop-blur-md">
+        <div role="status" className="absolute top-20 left-1/2 z-40 -translate-x-1/2 rounded-full border border-sky-400/40 bg-slate-950/90 px-4 py-2 text-xs font-medium text-sky-100 shadow-2xl">
           {locationNotice}
         </div>
       )}
@@ -406,24 +391,9 @@ export default function JobTracker() {
         onCommuteChange={setCommutePreferences}
       />
 
-      <JobResultsPanel
-        jobs={filteredJobs}
-        selectedJobId={selectedJobId}
-        loading={loading || commuteLoading}
-        onSelect={(job) => setSelectedJobId(job.id)}
-        onHighlight={setHighlightedJobId}
-      />
-
-      <AnalyticsDock
-        total={areaJobs.length}
-        filtered={filteredJobs.length}
-        visible={visibleCount}
-        onHighlightVisible={() => highlightVisible.current()}
-      />
-
       {(loading || commuteLoading) && (
-        <div className="absolute bottom-5 left-1/2 z-20 -translate-x-1/2 rounded-full bg-slate-950/80 px-3.5 py-1.5 text-xs font-medium text-white shadow-xl backdrop-blur-md animate-pulse">
-          {commuteLoading ? "Calculating commute area…" : "Counting jobs in this map area…"}
+        <div className="pointer-events-none absolute bottom-4 right-4 z-20 rounded-full bg-slate-950/85 px-3.5 py-1.5 text-xs font-medium text-white shadow-xl">
+          {commuteLoading ? "Calculating commute area…" : "Loading jobs…"}
         </div>
       )}
       {commuteError && (

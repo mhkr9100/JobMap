@@ -335,9 +335,9 @@ export default function LocationSearch({
   return (
     <div
       ref={containerRef}
-      className="absolute left-1/2 top-4 z-30 w-[min(66rem,calc(100vw-5rem))] -translate-x-1/2 md:top-6 md:w-[min(66rem,calc(100vw-4rem))]"
+      className="absolute left-1/2 top-4 z-40 w-[min(54rem,calc(100vw-2rem))] -translate-x-1/2 md:top-5"
     >
-      <div className="flex items-center rounded-2xl border border-white/50 bg-white/95 p-1.5 shadow-2xl backdrop-blur-2xl sm:rounded-full sm:p-2">
+      <div className="flex items-center rounded-2xl border border-slate-200/80 bg-white p-1.5 shadow-2xl sm:rounded-full sm:p-2">
         <div className="flex min-w-0 flex-1 items-center gap-2 px-2 sm:px-3">
           <Briefcase className="size-4 shrink-0 text-slate-400" />
           <input

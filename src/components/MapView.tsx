@@ -6,7 +6,8 @@ import type { Feature, FeatureCollection, Point, Polygon } from "geojson";
 import { ExternalLink, MapPin, X } from "lucide-react";
 import type { Job, JobViewport, MapTarget } from "@/types";
 import { companyLogoUrl, getJobApplicationLink } from "@/lib/jobs";
-import MapControls, { type CameraAction, type FlightCameraView, type FlightVisionMode, type ThrottleLevel } from "@/components/jobmap/map-controls";
+import MapControls, { type CameraAction, type FlightCameraView } from "@/components/jobmap/map-controls";
+import { Aircraft3DRenderer } from "@/lib/aircraft3d";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ?? "";
 
@@ -301,24 +302,12 @@ function clusterEl(total: number, onClick: () => void): HTMLElement {
 // ---------------------------------------------------------------------------
 
 const KEY_ACTIONS: Record<string, CameraAction> = {
-  w: "forward",
-  arrowup: "forward",
-  s: "back",
-  arrowdown: "back",
   a: "left",
   arrowleft: "left",
   d: "right",
   arrowright: "right",
-  q: "rotateLeft",
-  e: "rotateRight",
-  r: "tiltUp",
-  f: "tiltDown",
-  z: "zoomIn",
-  "+": "zoomIn",
-  "=": "zoomIn",
-  x: "zoomOut",
-  "-": "zoomOut",
-  _: "zoomOut",
+  q: "left",
+  e: "right",
 };
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -337,7 +326,6 @@ export default function MapView({
   highlightedJobId = null,
   commuteArea = null,
   flightStarted = true,
-  onChangeStartLocation,
   onSelectJob,
   onViewportChange,
   onVisibleCountChange,
@@ -346,6 +334,8 @@ export default function MapView({
 }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
+  const aircraftCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rendererRef = useRef<Aircraft3DRenderer | null>(null);
   const placesRef = useRef<Map<string, CompanyPlace>>(new Map());
   const markersRef = useRef<Map<string, MarkerEntry>>(new Map());
   const expandedBuildingRef = useRef<string | null>(null);
@@ -357,30 +347,18 @@ export default function MapView({
   const highlightedJobIdRef = useRef(highlightedJobId);
   const visibleCountRef = useRef(-1);
   const keysRef = useRef<Set<CameraAction>>(new Set());
-  const fastRef = useRef(false);
   const rafRef = useRef<number | null>(null);
   const lastMarkerRender = useRef(0);
-  const compassRef = useRef<HTMLSpanElement | null>(null);
-  const aircraftRigRef = useRef<HTMLDivElement | null>(null);
-  const shadowRigRef = useRef<HTMLDivElement | null>(null);
-  const afterburnerRef = useRef<SVGGElement | null>(null);
-  const horizonRef = useRef<HTMLDivElement | null>(null);
-  const hudHeadingRef = useRef<HTMLSpanElement | null>(null);
-  const hudSpeedRef = useRef<HTMLSpanElement | null>(null);
-  const hudAltitudeRef = useRef<HTMLSpanElement | null>(null);
-  const hudTargetRef = useRef<HTMLSpanElement | null>(null);
-  const lockedPlaceRef = useRef<CompanyPlace | null>(null);
-  const lastTargetScanRef = useRef(0);
+  const lastViewportReportRef = useRef(0);
   const bankAngleRef = useRef(0);
-  const pitchOffsetRef = useRef(0);
-  const isFlyingRef = useRef(false);
-  const throttleRef = useRef<ThrottleLevel>(2);
+  const yawAngleRef = useRef(0);
+  const lateralOffsetRef = useRef(0);
+  const isHoldingRef = useRef(false);
+  const holdBrakeRef = useRef(false);
+  const flightViewRef = useRef<FlightCameraView>("chase-close");
   const [flightView, setFlightView] = useState<FlightCameraView>("chase-close");
-  const [visionMode, setVisionMode] = useState<FlightVisionMode>("day");
-  const [isFlying, setIsFlying] = useState(false);
-  const [throttle, setThrottle] = useState<ThrottleLevel>(2);
+  const [isHolding, setIsHolding] = useState(false);
   const [companyPopup, setCompanyPopup] = useState<CompanyPopupState | null>(null);
-  const [is3D, setIs3D] = useState(true);
   const [isMapLoaded, setIsMapLoaded] = useState(false);
 
   onSelectRef.current = onSelectJob;
@@ -388,12 +366,12 @@ export default function MapView({
   onVisibleCountChangeRef.current = onVisibleCountChange;
   onHighlightVisibleReadyRef.current = onHighlightVisibleReady;
   highlightedJobIdRef.current = highlightedJobId;
-  isFlyingRef.current = isFlying;
-  throttleRef.current = throttle;
+  isHoldingRef.current = isHolding;
+  flightViewRef.current = flightView;
 
   const pauseFlight = useCallback(() => {
-    isFlyingRef.current = false;
-    setIsFlying(false);
+    isHoldingRef.current = true;
+    setIsHolding(true);
   }, []);
 
   const openCompany = useCallback((place: CompanyPlace) => {
@@ -578,139 +556,105 @@ export default function MapView({
     onHighlightVisibleReadyRef.current?.(highlightVisibleMarkers);
   }, [highlightVisibleMarkers]);
 
-  const updateAircraftAndHud = useCallback((m: mapboxgl.Map, bank: number, pitchDelta: number, thrustActive: boolean) => {
-    const rawBearing = ((m.getBearing() % 360) + 360) % 360;
-    const heading = Math.round(rawBearing) || 360;
-    const zoom = m.getZoom();
-    // Map zoom 15.1..18.0 to realistic low-altitude flight band (350 FT .. 1,850 FT AGL)
-    const altitudeFt = Math.round(350 + ((MAX_FLIGHT_ZOOM - zoom) / (MAX_FLIGHT_ZOOM - MIN_FLIGHT_ZOOM)) * 1500);
-    const speedKts = isFlyingRef.current || thrustActive
-      ? (throttleRef.current === 1 ? 55 : throttleRef.current === 2 ? 95 : 160) * (fastRef.current ? 1.4 : 1)
-      : 0;
+  const renderAircraftFrame = useCallback((now: number, activelyFlying: boolean) => {
+    const canvas = aircraftCanvasRef.current;
+    if (!canvas) return;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width === 0 || height === 0) return;
 
-    if (hudHeadingRef.current) hudHeadingRef.current.textContent = `${String(heading).padStart(3, "0")}°`;
-    if (hudAltitudeRef.current) hudAltitudeRef.current.textContent = `${altitudeFt.toLocaleString()} FT`;
-    if (hudSpeedRef.current) hudSpeedRef.current.textContent = `${Math.round(speedKts)} KTS`;
-    if (horizonRef.current) {
-      horizonRef.current.style.transform = `translate(-50%, -50%) rotate(${-bank.toFixed(1)}deg) translateY(${(pitchDelta * 2.2).toFixed(1)}px)`;
-    }
-    if (aircraftRigRef.current) {
-      aircraftRigRef.current.style.transform = `perspective(700px) rotateZ(${bank.toFixed(1)}deg) rotateX(${(12 + pitchDelta).toFixed(1)}deg)`;
-    }
-    if (shadowRigRef.current) {
-      const shadowScale = Math.max(0.65, Math.min(1.15, (zoom - 14.5) / 3));
-      shadowRigRef.current.style.transform = `translateX(${(bank * 1.1).toFixed(1)}px) scale(${shadowScale.toFixed(2)}) rotateZ(${(bank * 0.5).toFixed(1)}deg)`;
-    }
-    if (afterburnerRef.current) {
-      const flameScale = isFlyingRef.current || thrustActive
-        ? (throttleRef.current === 1 ? 0.85 : throttleRef.current === 2 ? 1.15 : 1.55) * (0.92 + Math.sin(performance.now() * 0.03) * 0.08)
-        : 0.4;
-      afterburnerRef.current.style.transform = `scaleY(${flameScale.toFixed(2)})`;
-      afterburnerRef.current.style.opacity = isFlyingRef.current || thrustActive ? "0.95" : "0.45";
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const targetW = Math.round(width * dpr);
+    const targetH = Math.round(height * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
     }
 
-    // Scan for nearest employer building ahead of aircraft every ~220ms
-    const now = performance.now();
-    if (now - lastTargetScanRef.current > 220 && hudTargetRef.current) {
-      lastTargetScanRef.current = now;
-      const center = m.getCenter();
-      let bestPlace: CompanyPlace | null = null;
-      let bestDistMeters = Infinity;
-      const rad = Math.PI / 180;
-      const cosLat = Math.cos(center.lat * rad);
-      for (const place of placesRef.current.values()) {
-        const dLng = (place.coords[0] - center.lng) * 111_320 * cosLat;
-        const dLat = (place.coords[1] - center.lat) * 110_540;
-        const dist = Math.hypot(dLng, dLat);
-        if (dist < bestDistMeters) {
-          bestDistMeters = dist;
-          bestPlace = place;
-        }
-      }
-      lockedPlaceRef.current = bestPlace;
-      if (bestPlace && bestDistMeters <= 2500) {
-        const distLabel = bestDistMeters < 1000 ? `${Math.round(bestDistMeters)}m` : `${(bestDistMeters / 1000).toFixed(1)}km`;
-        hudTargetRef.current.textContent = `${bestPlace.company.slice(0, 18)} · ${distLabel} (${bestPlace.jobs.length})`;
-      } else {
-        hudTargetRef.current.textContent = "SCANNING ST. LOUIS…";
-      }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    if (!rendererRef.current) {
+      rendererRef.current = new Aircraft3DRenderer();
     }
+
+    const pitchDeg = Math.abs(bankAngleRef.current) * 0.14;
+    rendererRef.current.render(ctx, width, height, {
+      rollDeg: bankAngleRef.current,
+      pitchDeg,
+      yawDeg: yawAngleRef.current,
+      lateralOffset: lateralOffsetRef.current,
+      timeMs: now,
+      cameraView: flightViewRef.current,
+      isFlying: activelyFlying,
+    });
   }, []);
 
-  // ---- Continuous 60-FPS Flight Simulator loop (cruise + keyboard + on-screen pad) ----
+  // ---- Continuous 60-FPS 3D Flight Loop (flies straight by default; Left/Right banks & turns) ----
   const step = useCallback(() => {
     const m = map.current;
-    const keys = keysRef.current;
-    const cruising = isFlyingRef.current;
-    if (!m || (!cruising && keys.size === 0 && Math.abs(bankAngleRef.current) < 0.3 && Math.abs(pitchOffsetRef.current) < 0.2)) {
-      bankAngleRef.current = 0;
-      pitchOffsetRef.current = 0;
-      if (m) updateAircraftAndHud(m, 0, 0, false);
+    const now = performance.now();
+    if (!m) {
       rafRef.current = null;
       return;
     }
 
-    const fast = fastRef.current ? 1.85 : 1;
-    const throttleMult = throttleRef.current === 1 ? 0.65 : throttleRef.current === 2 ? 1.1 : 1.85;
-    const baseSpeed = 2.6 * throttleMult * fast;
+    const keys = keysRef.current;
+    const turningLeft = keys.has("left");
+    const turningRight = keys.has("right");
+    const activelyFlying = !isHoldingRef.current && !holdBrakeRef.current;
 
-    let forwardSpeed = cruising ? baseSpeed : 0;
-    if (keys.has("forward")) forwardSpeed = Math.max(forwardSpeed, baseSpeed * 1.25);
-    if (keys.has("back")) forwardSpeed = cruising ? baseSpeed * 0.25 : -baseSpeed * 0.8;
+    // Smooth 3D roll (bank), nose yaw, and chase-camera lateral offset
+    const targetBank = turningLeft && !turningRight ? -35 : turningRight && !turningLeft ? 35 : 0;
+    const targetYaw = turningLeft && !turningRight ? -15 : turningRight && !turningLeft ? 15 : 0;
+    const targetLateral = turningLeft && !turningRight ? -0.85 : turningRight && !turningLeft ? 0.85 : 0;
 
-    const turningLeft = keys.has("left") || keys.has("rotateLeft");
-    const turningRight = keys.has("right") || keys.has("rotateRight");
+    bankAngleRef.current += (targetBank - bankAngleRef.current) * 0.12;
+    yawAngleRef.current += (targetYaw - yawAngleRef.current) * 0.12;
+    lateralOffsetRef.current += (targetLateral - lateralOffsetRef.current) * 0.09;
 
-    let turnRate = 0;
-    if (turningLeft) turnRate -= 1.35 * fast;
-    if (turningRight) turnRate += 1.35 * fast;
+    // Turn rate proportional to current bank angle (realistic banked turn)
+    const turnRate = bankAngleRef.current * 0.044;
+    const forwardSpeed = activelyFlying ? 2.85 : 0;
 
-    // Smooth bank (roll) physics: bank into turns up to +/-28 degrees
-    const targetBank = turningLeft && !turningRight ? -28 : turningRight && !turningLeft ? 28 : 0;
-    bankAngleRef.current += (targetBank - bankAngleRef.current) * 0.14;
+    if (activelyFlying || Math.abs(turnRate) > 0.02) {
+      let bearing = m.getBearing() + turnRate;
+      let center = m.getCenter();
 
-    // Smooth nose pitch visual response when climbing/descending or accelerating
-    const climbing = keys.has("zoomOut") || keys.has("tiltUp") || keys.has("forward");
-    const descending = keys.has("zoomIn") || keys.has("tiltDown") || keys.has("back");
-    const targetPitchOffset = climbing && !descending ? 8 : descending && !climbing ? -8 : 0;
-    pitchOffsetRef.current += (targetPitchOffset - pitchOffsetRef.current) * 0.14;
-
-    let bearing = m.getBearing() + turnRate;
-
-    let pitch = m.getPitch();
-    if (keys.has("tiltUp")) pitch += 1.1;
-    if (keys.has("tiltDown")) pitch -= 1.1;
-    pitch = Math.max(0, Math.min(MAX_PITCH, pitch));
-
-    let zoom = m.getZoom();
-    if (keys.has("zoomIn")) zoom += 0.03 * fast;
-    if (keys.has("zoomOut")) zoom -= 0.03 * fast;
-    zoom = Math.max(MIN_FLIGHT_ZOOM, Math.min(MAX_FLIGHT_ZOOM, zoom));
-
-    // Screen-space forward motion (dy < 0 moves forward along current camera bearing)
-    let dx = 0;
-    let dy = -forwardSpeed;
-    if (!cruising && !keys.has("forward") && !keys.has("back")) {
-      if (keys.has("left")) dx -= 4 * fast;
-      if (keys.has("right")) dx += 4 * fast;
-    }
-
-    let center = m.getCenter();
-    if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-      const projected = m.project(center);
-      const unprojected = m.unproject([projected.x + dx, projected.y + dy]);
-      const [clampedLng, clampedLat] = clampToLaunchRadius([unprojected.lng, unprojected.lat]);
-      // If we reach the 50-mile boundary while cruising, gently bank back toward St. Louis center
-      if (Math.abs(clampedLng - unprojected.lng) > 1e-6 || Math.abs(clampedLat - unprojected.lat) > 1e-6) {
-        bearing = (bearing + 3.2) % 360;
+      if (forwardSpeed > 0.01) {
+        const projected = m.project(center);
+        const unprojected = m.unproject([projected.x, projected.y - forwardSpeed]);
+        const [clampedLng, clampedLat] = clampToLaunchRadius([unprojected.lng, unprojected.lat]);
+        // If we reach the 50-mile St. Louis boundary, smoothly bank back toward downtown
+        if (Math.abs(clampedLng - unprojected.lng) > 1e-6 || Math.abs(clampedLat - unprojected.lat) > 1e-6) {
+          bearing = (bearing + 3.2) % 360;
+        }
+        center = new mapboxgl.LngLat(clampedLng, clampedLat);
       }
-      center = new mapboxgl.LngLat(clampedLng, clampedLat);
+
+      m.jumpTo({ center, bearing });
+
+      if (now - lastMarkerRender.current > 180) {
+        renderMarkersRef.current();
+      }
+      if (now - lastViewportReportRef.current > 1200) {
+        lastViewportReportRef.current = now;
+        const bounds = m.getBounds();
+        if (bounds) {
+          onViewportChangeRef.current?.({
+            minLng: bounds.getWest(),
+            minLat: bounds.getSouth(),
+            maxLng: bounds.getEast(),
+            maxLat: bounds.getNorth(),
+          });
+        }
+      }
     }
 
-    m.jumpTo({ center, bearing, pitch, zoom });
-    updateAircraftAndHud(m, bankAngleRef.current, pitchOffsetRef.current, Math.abs(forwardSpeed) > 0.1);
+    renderAircraftFrame(now, activelyFlying);
     rafRef.current = requestAnimationFrame(step);
-  }, [updateAircraftAndHud]);
+  }, [renderAircraftFrame]);
 
   const ensureLoopRunning = useCallback(() => {
     if (rafRef.current == null) {
@@ -718,11 +662,11 @@ export default function MapView({
     }
   }, [step]);
 
-  const toggleFlying = useCallback(() => {
-    setIsFlying((prev) => {
+  const toggleHold = useCallback(() => {
+    setIsHolding((prev) => {
       const next = !prev;
-      isFlyingRef.current = next;
-      if (next) {
+      isHoldingRef.current = next;
+      if (!next) {
         setCompanyPopup(null);
       }
       return next;
@@ -730,10 +674,18 @@ export default function MapView({
     ensureLoopRunning();
   }, [ensureLoopRunning]);
 
+  const setHoldBrake = useCallback(
+    (active: boolean) => {
+      holdBrakeRef.current = active;
+      ensureLoopRunning();
+    },
+    [ensureLoopRunning],
+  );
+
   useEffect(() => {
     if (flightStarted && isMapLoaded) {
-      isFlyingRef.current = true;
-      setIsFlying(true);
+      isHoldingRef.current = false;
+      setIsHolding(false);
       ensureLoopRunning();
     }
   }, [flightStarted, isMapLoaded, ensureLoopRunning]);
@@ -747,19 +699,10 @@ export default function MapView({
     [ensureLoopRunning],
   );
 
-  const resetNorth = useCallback(() => {
-    map.current?.easeTo({ bearing: 0, duration: 600 });
-  }, []);
-
-  const toggle3D = useCallback(() => {
-    const m = map.current;
-    if (!m) return;
-    m.easeTo({ pitch: m.getPitch() > 10 ? 0 : DEFAULT_PITCH, duration: 700 });
-  }, []);
-
   const setFlightCameraView = useCallback((view: FlightCameraView) => {
     const m = map.current;
     if (!m) return;
+    flightViewRef.current = view;
     setFlightView(view);
     const camera = {
       cockpit: { pitch: 72, zoom: 16.4 },
@@ -777,15 +720,15 @@ export default function MapView({
       container: mapContainer.current,
       style: "mapbox://styles/mapbox/standard",
       center: ST_LOUIS_CENTER,
-      zoom: 15.4,
-      pitch: DEFAULT_PITCH,
+      zoom: 15.7,
+      pitch: 64,
       bearing: -20,
       maxPitch: MAX_PITCH,
       minZoom: MIN_FLIGHT_ZOOM,
       maxZoom: MAX_FLIGHT_ZOOM,
       maxBounds: ST_LOUIS_FLIGHT_BOUNDS,
       antialias: true,
-      keyboard: false, // replaced by the game-style controls below
+      keyboard: false, // replaced by Left/Right/Hold flight controls
       dragRotate: true,
       pitchWithRotate: true,
       touchPitch: true,
@@ -875,13 +818,6 @@ export default function MapView({
       reportViewport();
     });
 
-    instance.on("rotate", () => {
-      if (compassRef.current) {
-        compassRef.current.style.transform = `rotate(${-instance.getBearing()}deg)`;
-      }
-    });
-    instance.on("pitchend", () => setIs3D(instance.getPitch() > 10));
-
     instance.on("move", () => {
       setCompanyPopup((current) => {
         if (!current) return null;
@@ -914,39 +850,14 @@ export default function MapView({
     };
   }, []);
 
-  // ---- Keyboard controls ----
+  // ---- Keyboard controls (Left, Right, Space = Hold) ----
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
-      fastRef.current = e.shiftKey;
       const key = e.key.toLowerCase();
       if (key === " ") {
         e.preventDefault();
-        toggleFlying();
-        return;
-      }
-      if (key === "1" || key === "2" || key === "3") {
-        e.preventDefault();
-        const level = Number(key) as ThrottleLevel;
-        throttleRef.current = level;
-        setThrottle(level);
-        ensureLoopRunning();
-        return;
-      }
-      if (key === "t") {
-        e.preventDefault();
-        if (lockedPlaceRef.current) {
-          openCompany(lockedPlaceRef.current);
-        }
-        return;
-      }
-      if (key === "v") {
-        e.preventDefault();
-        setVisionMode((prev) => (prev === "day" ? "nvg" : prev === "nvg" ? "flir" : "day"));
-        return;
-      }
-      if (key === "n") {
-        resetNorth();
+        toggleHold();
         return;
       }
       const action = KEY_ACTIONS[key];
@@ -955,7 +866,6 @@ export default function MapView({
       hold(action, true);
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      fastRef.current = e.shiftKey;
       const action = KEY_ACTIONS[e.key.toLowerCase()];
       if (action) hold(action, false);
     };
@@ -971,18 +881,7 @@ export default function MapView({
       window.removeEventListener("blur", onBlur);
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [hold, resetNorth, toggleFlying, ensureLoopRunning, openCompany]);
-
-  // ---- Vision Mode (Day / NVG Night / FLIR Thermal) ----
-  useEffect(() => {
-    const m = map.current;
-    if (!m || !isMapLoaded) return;
-    try {
-      m.setConfigProperty("basemap", "lightPreset", visionMode === "day" ? "day" : "night");
-    } catch {
-      // Fallback handled by optical HUD filter overlay below
-    }
-  }, [visionMode, isMapLoaded]);
+  }, [hold, toggleHold]);
 
   // ---- Data updates ----
   useEffect(() => {
@@ -1051,8 +950,8 @@ export default function MapView({
     }
     const timer = window.setTimeout(() => {
       if (flightStarted) {
-        isFlyingRef.current = true;
-        setIsFlying(true);
+        isHoldingRef.current = false;
+        setIsHolding(false);
         ensureLoopRunning();
       }
     }, 1850);
@@ -1082,259 +981,18 @@ export default function MapView({
       }}
       className="relative h-full w-full overflow-clip bg-slate-900"
     >
-      <div
-        ref={mapContainer}
-        className={`h-full w-full overflow-clip transition-[filter] duration-500 ${
-          visionMode === "nvg"
-            ? "contrast-125 hue-rotate-[70deg] saturate-150"
-            : visionMode === "flir"
-              ? "contrast-150 invert hue-rotate-180 saturate-200"
-              : ""
-        }`}
+      <div ref={mapContainer} className="h-full w-full" />
+
+      {/* Real-time 3D Polygon Aircraft Canvas (z-[2] sits above 3D buildings, below z-10 job pointers) */}
+      <canvas
+        ref={aircraftCanvasRef}
+        className="pointer-events-none absolute inset-0 z-[2] h-full w-full"
+        aria-hidden="true"
       />
-
-      {visionMode !== "day" && (
-        <div
-          className={`pointer-events-none absolute inset-0 z-[5] mix-blend-screen ${
-            visionMode === "nvg" ? "bg-emerald-950/25" : "bg-amber-950/20"
-          }`}
-          aria-hidden="true"
-        />
-      )}
-
-      {/* Top Flight Telemetry & Target-Lock Ribbon */}
-      <div className="pointer-events-auto absolute top-3 left-1/2 z-[15] hidden -translate-x-1/2 items-center gap-3 rounded-2xl border border-sky-400/30 bg-slate-950/85 px-4 py-1.5 font-mono text-xs text-sky-100 shadow-2xl backdrop-blur-md md:flex">
-        <div className="flex items-center gap-1.5">
-          <span className={`size-2 rounded-full ${isFlying ? "animate-pulse bg-emerald-400" : "bg-amber-400"}`} />
-          <span className="text-[10px] font-bold tracking-widest text-sky-400">
-            {isFlying ? "CRUISE" : "HOVER"}
-          </span>
-        </div>
-        <span className="text-slate-600">|</span>
-        <div className="flex items-center gap-1">
-          <span className="text-[10px] text-slate-400">SPD</span>
-          <span ref={hudSpeedRef} className="w-15 text-right font-bold text-emerald-300">
-            {isFlying ? (throttle === 1 ? "55 KTS" : throttle === 2 ? "95 KTS" : "160 KTS") : "0 KTS"}
-          </span>
-        </div>
-        <span className="text-slate-600">|</span>
-        <div className="flex items-center gap-1">
-          <span className="text-[10px] text-slate-400">HDG</span>
-          <span ref={hudHeadingRef} className="w-9 text-right font-bold text-white">340°</span>
-        </div>
-        <span className="text-slate-600">|</span>
-        <div className="flex items-center gap-1">
-          <span className="text-[10px] text-slate-400">ALT</span>
-          <span ref={hudAltitudeRef} className="w-16 text-right font-bold text-sky-300">1,250 FT</span>
-        </div>
-        <span className="text-slate-600">|</span>
-        <button
-          type="button"
-          onClick={() => {
-            if (lockedPlaceRef.current) openCompany(lockedPlaceRef.current);
-          }}
-          title="Click or press T to lock & inspect nearest building"
-          className="flex items-center gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-300 transition hover:bg-emerald-500/25"
-        >
-          <span className="text-emerald-400">TGT [T]:</span>
-          <span ref={hudTargetRef} className="max-w-44 truncate">SCANNING ST. LOUIS…</span>
-        </button>
-      </div>
-
-      {/* 3D Chase Aircraft Rig (Close Chase & Far Chase) */}
-      {flightView !== "cockpit" && (
-        <div
-          className={`pointer-events-none absolute left-1/2 z-[6] flex -translate-x-1/2 flex-col items-center justify-center ${
-            flightView === "chase-close" ? "bottom-[16%] scale-100" : "bottom-[22%] scale-75"
-          } transition-all duration-300`}
-          aria-hidden="true"
-        >
-          {/* 3D Articulated Jet Model */}
-          <div
-            ref={aircraftRigRef}
-            className="relative flex items-center justify-center transition-transform duration-75 will-change-transform"
-            style={{ transform: "perspective(700px) rotateZ(0deg) rotateX(12deg)" }}
-          >
-            <svg
-              width="168"
-              height="152"
-              viewBox="0 0 168 152"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-              className="drop-shadow-[0_18px_20px_rgba(2,6,23,0.55)]"
-            >
-              <defs>
-                <linearGradient id="jm-fuselage" x1="84" y1="6" x2="84" y2="124" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#f8fafc" />
-                  <stop offset="55%" stopColor="#cbd5e1" />
-                  <stop offset="100%" stopColor="#334155" />
-                </linearGradient>
-                <linearGradient id="jm-wing-left" x1="12" y1="78" x2="84" y2="58" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#64748b" />
-                  <stop offset="60%" stopColor="#e2e8f0" />
-                  <stop offset="100%" stopColor="#94a3b8" />
-                </linearGradient>
-                <linearGradient id="jm-wing-right" x1="156" y1="78" x2="84" y2="58" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#475569" />
-                  <stop offset="60%" stopColor="#cbd5e1" />
-                  <stop offset="100%" stopColor="#94a3b8" />
-                </linearGradient>
-                <linearGradient id="jm-canopy" x1="84" y1="22" x2="84" y2="58" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#38bdf8" />
-                  <stop offset="50%" stopColor="#0284c7" />
-                  <stop offset="100%" stopColor="#0f172a" />
-                </linearGradient>
-                <linearGradient id="jm-afterburner" x1="84" y1="110" x2="84" y2="150" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#ffffff" />
-                  <stop offset="30%" stopColor="#38bdf8" />
-                  <stop offset="70%" stopColor="#f97316" />
-                  <stop offset="100%" stopColor="#ef4444" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-
-              {/* Swept Main Wings */}
-              <path
-                d="M84 44 L10 86 L16 96 L74 82 L84 44 Z"
-                fill="url(#jm-wing-left)"
-                stroke="#1e293b"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M84 44 L158 86 L152 96 L94 82 L84 44 Z"
-                fill="url(#jm-wing-right)"
-                stroke="#1e293b"
-                strokeWidth="1.5"
-              />
-
-              {/* Blue Accent Wing Stripes */}
-              <path d="M70 56 L24 84 L29 89 L72 68 Z" fill="#2563eb" opacity="0.85" />
-              <path d="M98 56 L144 84 L139 89 L96 68 Z" fill="#2563eb" opacity="0.85" />
-
-              {/* Rear Horizontal Stabilizers (Elevators) */}
-              <path
-                d="M84 90 L46 114 L50 120 L78 110 Z"
-                fill="#64748b"
-                stroke="#0f172a"
-                strokeWidth="1.2"
-              />
-              <path
-                d="M84 90 L122 114 L118 120 L90 110 Z"
-                fill="#475569"
-                stroke="#0f172a"
-                strokeWidth="1.2"
-              />
-
-              {/* Supersonic Fuselage Body */}
-              <path
-                d="M84 6 C79 22 75 46 75 78 L73 112 L95 112 L93 78 C93 46 89 22 84 6 Z"
-                fill="url(#jm-fuselage)"
-                stroke="#0f172a"
-                strokeWidth="1.5"
-              />
-
-              {/* Cockpit Glass Canopy */}
-              <path
-                d="M84 22 C80.5 30 79.5 42 80.5 55 C82.5 58 85.5 58 87.5 55 C88.5 42 87.5 30 84 22 Z"
-                fill="url(#jm-canopy)"
-                stroke="#e0f2fe"
-                strokeWidth="1"
-              />
-
-              {/* Twin Vertical Tail Fins */}
-              <path d="M75 84 L66 114 L73 114 L78 90 Z" fill="#1e293b" stroke="#94a3b8" strokeWidth="1" />
-              <path d="M93 84 L102 114 L95 114 L90 90 Z" fill="#1e293b" stroke="#94a3b8" strokeWidth="1" />
-
-              {/* Twin Jet Engine Nozzles */}
-              <ellipse cx="78.5" cy="113" rx="4" ry="2.5" fill="#0f172a" stroke="#64748b" strokeWidth="1" />
-              <ellipse cx="89.5" cy="113" rx="4" ry="2.5" fill="#0f172a" stroke="#64748b" strokeWidth="1" />
-
-              {/* Dynamic Afterburner Plumes */}
-              <g ref={afterburnerRef} style={{ transformOrigin: "84px 114px" }}>
-                <path d="M75 114 Q78.5 144 78.5 148 Q78.5 144 82 114 Z" fill="url(#jm-afterburner)" />
-                <path d="M86 114 Q89.5 144 89.5 148 Q89.5 144 93 114 Z" fill="url(#jm-afterburner)" />
-                <ellipse cx="78.5" cy="116" rx="2.5" ry="4" fill="#e0f2fe" />
-                <ellipse cx="89.5" cy="116" rx="2.5" ry="4" fill="#e0f2fe" />
-              </g>
-
-              {/* Wingtip Strobe & Navigation Lights (Port Red, Starboard Green) */}
-              <circle cx="13" cy="88" r="2.8" fill="#ef4444" />
-              <circle cx="13" cy="88" r="6" fill="#ef4444" opacity="0.35" />
-              <circle cx="155" cy="88" r="2.8" fill="#22c55e" />
-              <circle cx="155" cy="88" r="6" fill="#22c55e" opacity="0.35" />
-            </svg>
-          </div>
-
-          {/* Ground Shadow Projected Below Aircraft */}
-          <div
-            ref={shadowRigRef}
-            className="mt-2 h-5 w-28 rounded-full bg-slate-950/35 blur-md transition-transform duration-75"
-          />
-        </div>
-      )}
-
-      {/* First-Person Cockpit View HUD & Canopy Frame */}
-      {flightView === "cockpit" && (
-        <div className="pointer-events-none absolute inset-0 z-[6] overflow-hidden" aria-hidden="true">
-          {/* Upper Canopy Bow & Angled Side Struts */}
-          <svg className="absolute inset-0 h-full w-full" preserveAspectRatio="none" viewBox="0 0 1000 700">
-            <path
-              d="M0 0 L1000 0 L1000 45 L820 20 L180 20 L0 45 Z"
-              fill="rgba(2,6,23,0.65)"
-            />
-            <path d="M180 20 L65 700 L0 700 L0 45 Z" fill="rgba(2,6,23,0.42)" />
-            <path d="M820 20 L935 700 L1000 700 L1000 45 Z" fill="rgba(2,6,23,0.42)" />
-            <line x1="180" y1="20" x2="65" y2="700" stroke="rgba(56,189,248,0.28)" strokeWidth="2" />
-            <line x1="820" y1="20" x2="935" y2="700" stroke="rgba(56,189,248,0.28)" strokeWidth="2" />
-          </svg>
-
-          {/* Center Pitch Ladder & Artificial Horizon */}
-          <div
-            ref={horizonRef}
-            className="absolute top-1/2 left-1/2 flex size-72 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-between py-8 opacity-85 transition-transform duration-75"
-          >
-            <div className="flex w-32 justify-between border-t-2 border-emerald-400/70 pt-0.5 font-mono text-[9px] text-emerald-300">
-              <span>+10</span>
-              <span>+10</span>
-            </div>
-            <div className="flex w-56 items-center justify-between">
-              <span className="h-0.5 w-20 bg-emerald-400/90 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
-              <span className="h-0.5 w-20 bg-emerald-400/90 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
-            </div>
-            <div className="flex w-32 justify-between border-b-2 border-dashed border-emerald-400/70 pb-0.5 font-mono text-[9px] text-emerald-300">
-              <span>-10</span>
-              <span>-10</span>
-            </div>
-          </div>
-
-          {/* Fixed Aircraft Flight Path Vector Reticle */}
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-            <svg width="64" height="36" viewBox="0 0 64 36" fill="none">
-              <circle cx="32" cy="18" r="6" stroke="#34d399" strokeWidth="2" />
-              <line x1="8" y1="18" x2="26" y2="18" stroke="#34d399" strokeWidth="2" />
-              <line x1="38" y1="18" x2="56" y2="18" stroke="#34d399" strokeWidth="2" />
-              <line x1="32" y1="4" x2="32" y2="12" stroke="#34d399" strokeWidth="2" />
-            </svg>
-          </div>
-
-          {/* Cockpit Glareshield Dashboard */}
-          <div className="absolute inset-x-0 bottom-0 flex h-24 items-end justify-center bg-gradient-to-t from-slate-950/90 via-slate-950/50 to-transparent pb-3">
-            <div className="flex items-center gap-4 rounded-2xl border border-emerald-400/40 bg-slate-950/85 px-5 py-2 font-mono text-xs text-emerald-300 shadow-[0_0_24px_rgba(16,185,129,0.25)] backdrop-blur-md">
-              <span>COCKPIT HUD · ST. LOUIS 3D FLIGHT DECK</span>
-              <span className="text-slate-600">|</span>
-              <span className="text-[11px] text-sky-300">3D ALTITUDE LOCK ACTIVE</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <p className="pointer-events-auto absolute right-3 top-3 z-[4] max-w-[min(34rem,calc(100%-1.5rem))] rounded-lg bg-white/80 px-2.5 py-1.5 text-[10px] text-slate-600 shadow-sm backdrop-blur-sm">
-        Employer sites: <a className="underline" href="https://www.stlouis-mo.gov/data/" target="_blank" rel="noreferrer">St. Louis open data</a>
-        {" · "}<a className="underline" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors (ODbL)</a>
-      </p>
 
       {popup && (
         <div
-          className="absolute z-30 flex w-80 flex-col rounded-3xl border border-white/50 bg-white/95 p-4 shadow-2xl backdrop-blur-2xl"
+          className="absolute z-30 flex w-80 flex-col rounded-3xl border border-slate-200 bg-white p-4 shadow-2xl"
           style={{
             left: Math.max(16, Math.min(containerWidth - 336, popup.point.x - 160)),
             top: placeBelow
@@ -1387,7 +1045,7 @@ export default function MapView({
             </p>
             <button
               type="button"
-              onClick={toggleFlying}
+              onClick={toggleHold}
               className="rounded-lg bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-500/25"
             >
               Resume Flight (Space)
@@ -1432,23 +1090,11 @@ export default function MapView({
 
       <MapControls
         onHold={hold}
-        onResetNorth={resetNorth}
-        onToggle3D={toggle3D}
-        onCameraViewChange={setFlightCameraView}
+        isHolding={isHolding}
+        onToggleHold={toggleHold}
+        onHoldBrake={setHoldBrake}
         cameraView={flightView}
-        visionMode={visionMode}
-        onVisionModeChange={setVisionMode}
-        is3D={is3D}
-        isFlying={isFlying}
-        onToggleFlying={toggleFlying}
-        throttle={throttle}
-        onThrottleChange={(level) => {
-          throttleRef.current = level;
-          setThrottle(level);
-          ensureLoopRunning();
-        }}
-        onChangeStartLocation={onChangeStartLocation}
-        compassRef={compassRef}
+        onCameraViewChange={setFlightCameraView}
       />
     </div>
   );
