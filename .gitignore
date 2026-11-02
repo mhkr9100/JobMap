@@ -9,3 +9,4 @@ next-env.d.ts
 __pycache__/
 *.pyc
 .DS_Store
+_archive/
